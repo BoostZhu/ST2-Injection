@@ -1,0 +1,102 @@
+# 1. Project-Specific Folders
+# ===================================================================
+# Python / AI / ML Project .gitignore
+# For the video_style_transfer project
+# ==============================================================
+/data/
+
+# 忽略所有输出结果 (生成的视频、帧、日志等)
+
+/results/
+/output/
+/outputs/
+
+# 忽略下载或自训练的模型文件
+
+/models/
+/checkpoints/
+
+# 2. Python & Virtual Environments
+# -------------------------------------------------------------------
+# 忽略Python的编译缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略Python的虚拟环境文件夹 (非常重要！)
+# 你的代码依赖的环境，而不是环境本身，应该被追踪
+venv/
+.venv/
+env/
+.env/
+virtualenv/
+ENV/
+
+# 忽略打包和安装时生成的文件夹
+build/
+dist/
+*.egg-info/
+*.egg
+
+# 忽略IPython / Jupyter Notebook的检查点
+.ipynb_checkpoints
+
+# 3. IDE & Editor Configuration
+# -------------------------------------------------------------------
+# 忽略 VS Code 的本地设置
+# .vscode/ 文件夹可以包含工作区设置，但通常也包含用户本地的设置
+# 为了避免冲突，通常全部忽略
+.vscode/*
+# 如果你想共享设置，可以取消下面这行的注释
+# !.vscode/settings.json
+
+# 忽略其他常用编辑器的配置文件
+.idea/  # PyCharm
+*.sublime-project
+*.sublime-workspace
+
+# 4. Large Files & Sensitive Information
+# -------------------------------------------------------------------
+# 忽略常见的日志文件
+*.log
+logs/
+
+# 忽略常见的数据库文件
+*.db
+*.sqlite3
+
+# 忽略包含敏感信息的文件 (API Keys, passwords)
+.env
+.env.*
+secrets.yaml
+config.yaml
+
+# 忽略常见的大型文件格式，以防它们被意外添加到非指定目录
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+
+*.zip
+*.gz
+*.rar
+*.7z
+
+# 5. Operating System Files
+# -------------------------------------------------------------------
+# 忽略macOS系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 忽略Windows系统文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
