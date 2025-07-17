@@ -421,7 +421,7 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
         if isinstance(style_image, np.ndarray):
             style_image = normalize(style_image).to(device=device, dtype=self.vae.dtype)
         
-        # Get empty text embeddings (or use custom text if provided)
+        # Get empty text embeddings
         text_embeddings = self.get_text_embedding()
         
         # Step 1: Encode images to latent space
@@ -457,11 +457,11 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
         # Initial latent processing - AdaIN if enabled
         if not self.without_init_adain:
             # Apply AdaIN (Adaptive Instance Normalization)
-            latent_cs = (content_latents[-1] - content_latents[-1].mean(dim=(2, 3), keepdim=True)) / (
-                content_latents[-1].std(dim=(2, 3), keepdim=True) + 1e-4
-            ) * style_latents[-1].std(dim=(2, 3), keepdim=True) + style_latents[-1].mean(dim=(2, 3), keepdim=True)
+            latent_cs = (content_latents[0] - content_latents[0].mean(dim=(2, 3), keepdim=True)) / (
+                content_latents[0].std(dim=(2, 3), keepdim=True) + 1e-4
+            ) * style_latents[0].std(dim=(2, 3), keepdim=True) + style_latents[0].mean(dim=(2, 3), keepdim=True)
         else:
-            latent_cs = content_latents[-1]
+            latent_cs = content_latents[0]
         
         # DDIM sampling for style transfer
         result_latents = []
