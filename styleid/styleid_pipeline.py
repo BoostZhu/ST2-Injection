@@ -109,7 +109,7 @@ class StyleIDAttnProcessor(AttnProcessor):
         # 计算查询向量
         query = attn.to_q(hidden_states)
 
-        # 判断是否为自注意力（这是关键部分）
+        # 判断是否为自注意力
         is_self_attention = encoder_hidden_states is None
         
         # 处理键和值向量
@@ -131,8 +131,7 @@ class StyleIDAttnProcessor(AttnProcessor):
         # 根据 StyleID 状态进行处理
         # 只在自注意力模式下应用 StyleID 技术
         if is_self_attention:
-            # 获取映射的时间步（用于样本生成阶段）
-            mapped_t = self.state.get_mapped_timestep(t) if hasattr(self.state, 'get_mapped_timestep') else t
+            
             
             if self.state.state == StyleIDState.INVERT_STYLE:
                 # 存储风格图像的特征
@@ -150,13 +149,13 @@ class StyleIDAttnProcessor(AttnProcessor):
                 # 生成阶段：使用存储的特征进行风格迁移
                 if (layer in self.state.style_features and 
                     layer in self.state.content_features and
-                    mapped_t in self.state.style_features[layer] and
-                    mapped_t in self.state.content_features[layer]):
+                    t in self.state.style_features[layer] and
+                    t in self.state.content_features[layer]):
                     
                     # 获取映射时间步的特征
-                    q_c = self.state.content_features[layer][mapped_t][0]
-                    k_s = self.state.style_features[layer][mapped_t][1]
-                    v_s = self.state.style_features[layer][mapped_t][2]
+                    q_c = self.state.content_features[layer][t][0]
+                    k_s = self.state.style_features[layer][t][1]
+                    v_s = self.state.style_features[layer][t][2]
                     
                     # 确保形状匹配
                     if q_c.shape[0] != query.shape[0]:
@@ -212,6 +211,7 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
         scheduler: DDIMScheduler,
         safety_checker: Optional[Any] = None,
         feature_extractor: Optional[CLIPImageProcessor] = None,
+        image_encoder: Optional[Any] = None,
         requires_safety_checker: bool = True,
     ):
         super().__init__(
@@ -222,6 +222,7 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
+            image_encoder=image_encoder,
             requires_safety_checker=requires_safety_checker,
         )
         
@@ -244,14 +245,20 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
         """Initialize the attention processors for StyleID"""
         # Map layer indices to the UNet's attention blocks
         block_mapping = {
-            # These mappings are based on the original StyleID implementation's mapping
-            # to the diffusers UNet attention block
-            7: "up_blocks.2.attentions.0",
-            8: "up_blocks.2.attentions.1",
-            9: "up_blocks.2.attentions.2", 
-            10: "up_blocks.3.attentions.0",
-            11: "up_blocks.3.attentions.1",
-            12: "up_blocks.3.attentions.2",
+            # Up Block 1 (i // 3 == 1)
+            3: "up_blocks.1.attentions.0.transformer_blocks.0.attn1",
+            4: "up_blocks.1.attentions.1.transformer_blocks.0.attn1",
+            5: "up_blocks.1.attentions.2.transformer_blocks.0.attn1",
+            
+            # Up Block 2 (i // 3 == 2)
+            6: "up_blocks.2.attentions.0.transformer_blocks.0.attn1",
+            7: "up_blocks.2.attentions.1.transformer_blocks.0.attn1",
+            8: "up_blocks.2.attentions.2.transformer_blocks.0.attn1",
+            
+            # Up Block 3 (i // 3 == 3)
+            9: "up_blocks.3.attentions.0.transformer_blocks.0.attn1",
+            10: "up_blocks.3.attentions.1.transformer_blocks.0.attn1",
+            11: "up_blocks.3.attentions.2.transformer_blocks.0.attn1",
         }
     
         # Register attention processors
@@ -406,8 +413,7 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
         # Set number of steps for scheduler
         self.scheduler.set_timesteps(num_inference_steps)
         
-        # Initialize time step mapping
-        self.state.setup_timestep_mapping(self.scheduler)
+        
         
         # Preprocess images if they're numpy arrays
         if isinstance(content_image, np.ndarray):
@@ -545,6 +551,7 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
             scheduler=pipeline.scheduler,
             safety_checker=pipeline.safety_checker if hasattr(pipeline, "safety_checker") else None,
             feature_extractor=pipeline.feature_extractor if hasattr(pipeline, "feature_extractor") else None,
+            image_encoder=getattr(pipeline, "image_encoder", None),
             requires_safety_checker=pipeline.config.requires_safety_checker if hasattr(pipeline.config, "requires_safety_checker") else False,
         )
         
