@@ -130,6 +130,7 @@ def main():
             continue
         print(f"\n[Style Pre-computation] Inverting style '{style_name}' once...")
         pipeline.state.reset()
+        pipeline.scheduler.set_timesteps(args.ddim_steps, device=pipeline.device)
         pipeline.state.to_invert_style()
         text_embeddings = pipeline.get_text_embedding() # get an empty text embedding
         style_latent = pipeline.encode_image(style_image_rgb)
