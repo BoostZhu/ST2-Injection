@@ -47,6 +47,8 @@ class StyleIDState:
     def reset(self):
         self.__state = StyleIDState.INVERT_STYLE
         self.__timestep = 0
+        self.style_features = {}
+        self.content_features = {}
     
     def set_timestep(self, t):
         self.__timestep = t
@@ -524,6 +526,104 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
                 save_image(all_images_np, os.path.join(save_intermediates_dir, "reverse_stylized.jpg"))
         
         # Convert to output format
+        if output_type == "pil":
+            final_images = self.image_processor.postprocess(final_image, output_type="pil")
+        elif output_type == "np":
+            final_images = denormalize(final_image)
+        else:
+            final_images = final_image
+            
+        if not return_dict:
+            return final_images
+            
+        return StableDiffusionPipelineOutput(images=final_images, nsfw_content_detected=[False] * len(final_images))
+    
+    def transfer_with_cached_style(
+        self,
+        content_image,
+        style_image_for_adain, # only used for initial AdaIN
+        num_inference_steps=50,
+        gamma=None,
+        temperature=None,
+        without_init_adain=None,
+        without_attn_injection=None,
+        output_type="pil",
+        return_dict=True,
+        guidance_scale=1.0
+    ):
+        """
+        A streamlined style transfer function that assumes style features
+        are already cached in self.state.style_features. It only performs
+        content inversion and then proceeds to the transfer step.
+        """
+        # update parameters, but do not reset state
+        self.update_parameters(
+            gamma=gamma,
+            temperature=temperature,
+            without_init_adain=without_init_adain,
+            without_attn_injection=without_attn_injection
+        )
+
+        device = self.device
+        self.scheduler.set_timesteps(num_inference_steps)
+        
+        # preprocess images
+        if isinstance(content_image, np.ndarray):
+            content_image = normalize(content_image).to(device=device, dtype=self.vae.dtype)
+        if isinstance(style_image_for_adain, np.ndarray):
+            style_image_for_adain = normalize(style_image_for_adain).to(device=device, dtype=self.vae.dtype)
+        
+        text_embeddings = self.get_text_embedding()
+        
+        # Step 1: Encode images
+        # encode style image only for initial AdaIN
+        style_latent = self.encode_image(style_image_for_adain) 
+        content_latent = self.encode_image(content_image)
+        
+        # Step 2: (skip) DDIM Inversion of style image
+        # we assume style_features has been filled by the main loop
+
+        # Step 3: DDIM Inversion of content image
+        # clear old content features and set to content inversion mode
+        self.state.content_features.clear()
+        self.state.to_invert_content()
+        print("Inverting content image...")
+        content_latents = self.ddim_inversion(content_latent, text_embeddings)
+        
+        # Step 4: Style Transfer
+        self.state.to_transfer()
+        print("Transferring style...")
+        
+        # initial latent variable processing - AdaIN
+        if not self.without_init_adain:
+            latent_cs = (content_latents[0] - content_latents[0].mean(dim=(2, 3), keepdim=True)) / (
+                content_latents[0].std(dim=(2, 3), keepdim=True) + 1e-4
+            ) * style_latent.std(dim=(2, 3), keepdim=True) + style_latent.mean(dim=(2, 3), keepdim=True)
+        else:
+            latent_cs = content_latents[0]
+            
+        # DDIM sampling
+        current_latent = latent_cs
+        for i, t in enumerate(tqdm(self.scheduler.timesteps, desc="DDIM Sampling")):
+            self.state.set_timestep(t.item())
+            
+            if self.without_attn_injection:
+                current_processors = self.unet.attn_processors.copy()
+                for k, p in current_processors.items():
+                    if isinstance(p, StyleIDAttnProcessor):
+                        self.unet.attn_processors[k] = AttnProcessor()
+
+            with torch.no_grad():
+                noise_pred = self.unet(current_latent, t, encoder_hidden_states=text_embeddings).sample
+                current_latent = self.scheduler.step(noise_pred, t, current_latent).prev_sample
+
+            if self.without_attn_injection:
+                self.unet.set_attn_processor(current_processors)
+        
+        # decode and return
+        with torch.no_grad():
+            final_image = self.decode_latent(current_latent)
+        
         if output_type == "pil":
             final_images = self.image_processor.postprocess(final_image, output_type="pil")
         elif output_type == "np":

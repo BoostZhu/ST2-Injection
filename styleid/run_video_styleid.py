@@ -128,8 +128,14 @@ def main():
         except Exception as e:
             print(f"Skipping style {style_path} due to loading error: {e}")
             continue
-
-        for content_folder in tqdm(content_folders, desc=f"Processing with Style '{style_name}'", leave=False):
+        print(f"\n[Style Pre-computation] Inverting style '{style_name}' once...")
+        pipeline.state.reset()
+        pipeline.state.to_invert_style()
+        text_embeddings = pipeline.get_text_embedding() # get an empty text embedding
+        style_latent = pipeline.encode_image(style_image_rgb)
+        pipeline.ddim_inversion(style_latent, text_embeddings)
+        print(f"Style '{style_name}' inverted and features are now cached.")
+        for content_folder in tqdm(content_folders, desc=f"Processing Content for '{style_name}'", leave=False):
             content_name = os.path.basename(content_folder)
             
             # Create the specific output folder for this (style, content) pair
@@ -150,24 +156,22 @@ def main():
                 try:
                     content_frame_rgb = load_image_from_path(frame_path)
                     
-                    # Run the style transfer for the single frame
-                    # save_intermediates_dir is set to None because we handle saving ourselves.
-                    stylized_output = pipeline.style_transfer(
+                    # call a modified transfer function ===
+                    # This function will reuse the cached style features
+                    stylized_output = pipeline.transfer_with_cached_style(
                         content_image=content_frame_rgb,
-                        style_image=style_image_rgb,
+                        style_image_for_adain=style_image_rgb, # 仅用于初始AdaIN
                         num_inference_steps=args.ddim_steps,
                         gamma=args.gamma,
                         temperature=args.temperature,
                         without_init_adain=args.without_init_adain,
                         without_attn_injection=args.without_attn_injection,
-                        save_intermediates_dir=None,
-                        output_type="pil" # Get a PIL image back
+                        output_type="pil"
                     )
                     
                     # Save the stylized frame
                     output_image = stylized_output.images[0]
                     frame_basename = os.path.basename(frame_path)
-                    # It's good practice to save as PNG to avoid compression artifacts
                     output_frame_path = os.path.join(result_path, f"{os.path.splitext(frame_basename)[0]}.png")
                     output_image.save(output_frame_path)
 
@@ -175,6 +179,7 @@ def main():
                     print(f"\nError processing frame {frame_path}: {e}")
                     print("Skipping frame and continuing...")
                     continue
+
 
     print("\n--- Video style transfer complete! ---")
 
