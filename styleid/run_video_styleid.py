@@ -128,40 +128,31 @@ def main():
         except Exception as e:
             print(f"Skipping style {style_path} due to loading error: {e}")
             continue
-        print(f"\n[Style Pre-computation] Inverting style '{style_name}' once...")
-        pipeline.state.reset()
-        pipeline.scheduler.set_timesteps(args.ddim_steps, device=pipeline.device)
-        pipeline.state.to_invert_style()
-        text_embeddings = pipeline.get_text_embedding() # get an empty text embedding
-        style_latent = pipeline.encode_image(style_image_rgb)
-        pipeline.ddim_inversion(style_latent, text_embeddings)
-        print(f"Style '{style_name}' inverted and features are now cached.")
+
+        # 1. 对每个风格，只预计算一次
+        style_cache = pipeline.precompute_style(
+            style_image=style_image_rgb,
+            num_inference_steps=args.ddim_steps
+        )
+
         for content_folder in tqdm(content_folders, desc=f"Processing Content for '{style_name}'", leave=False):
             content_name = os.path.basename(content_folder)
-            
-            # Create the specific output folder for this (style, content) pair
             result_folder_name = f"{style_name}_stylized_{content_name}"
             result_path = os.path.join(args.output_dir, result_folder_name)
             os.makedirs(result_path, exist_ok=True)
             
-            # Get all frames in the content folder, sorted numerically/alphabetically
             frame_paths = sorted(glob.glob(os.path.join(content_folder, "*[.jpg,.jpeg,.png]")))
-
             if not frame_paths:
-                print(f"Warning: No frames found in {content_folder}, skipping.")
                 continue
-
-            print(f"\nProcessing: {content_name} ({len(frame_paths)} frames) with style {style_name}")
 
             for frame_path in tqdm(frame_paths, desc=f"Stylizing '{content_name}'", leave=False):
                 try:
                     content_frame_rgb = load_image_from_path(frame_path)
                     
-                    # call a modified transfer function ===
-                    # This function will reuse the cached style features
-                    stylized_output = pipeline.transfer_with_cached_style(
+                    # 2. 对每个内容帧，使用缓存的风格进行迁移
+                    stylized_output = pipeline.transfer_from_precomputed(
                         content_image=content_frame_rgb,
-                        style_image_for_adain=style_image_rgb, # 仅用于初始AdaIN
+                        style_cache=style_cache,
                         num_inference_steps=args.ddim_steps,
                         gamma=args.gamma,
                         temperature=args.temperature,
@@ -170,7 +161,6 @@ def main():
                         output_type="pil"
                     )
                     
-                    # Save the stylized frame
                     output_image = stylized_output.images[0]
                     frame_basename = os.path.basename(frame_path)
                     output_frame_path = os.path.join(result_path, f"{os.path.splitext(frame_basename)[0]}.png")
@@ -178,9 +168,9 @@ def main():
 
                 except Exception as e:
                     print(f"\nError processing frame {frame_path}: {e}")
-                    print("Skipping frame and continuing...")
+                    import traceback
+                    traceback.print_exc()
                     continue
-
 
     print("\n--- Video style transfer complete! ---")
 
