@@ -617,7 +617,7 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
             return final_images
         
         return StableDiffusionPipelineOutput(images=final_images, nsfw_content_detected=[False] * len(final_images))
-    
+        
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         """Load the StyleID pipeline from a pretrained model"""
