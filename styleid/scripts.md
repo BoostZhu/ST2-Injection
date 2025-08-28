@@ -1,4 +1,4 @@
-Example 1: Process all videos with all styles
+=Example 1: Process all videos with all styles
 
 
 python video_style_transfer.py \

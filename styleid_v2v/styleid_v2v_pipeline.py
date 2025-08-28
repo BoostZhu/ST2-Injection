@@ -64,14 +64,24 @@ def flow_warp(feature, flow, mask=False, mode="bilinear", padding_mode="zeros"):
     return bilinear_sample(feature, grid, mode=mode, padding_mode=padding_mode, return_mask=mask)
 
 def forward_backward_consistency_check(fwd_flow, bwd_flow, alpha=0.01, beta=0.5):
-    flow_mag = torch.norm(fwd_flow, dim=1) + torch.norm(bwd_flow, dim=1)
-    warped_bwd_flow = flow_warp(bwd_flow, fwd_flow)
-    warped_fwd_flow = flow_warp(fwd_flow, bwd_flow)
-    diff_fwd = torch.norm(fwd_flow + warped_bwd_flow, dim=1)
+    # fwd_flow, bwd_flow: [B, 2, H, W]
+    # alpha and beta values are following UnFlow
+    # (https://huggingface.co/papers/1711.07837)
+    assert fwd_flow.dim() == 4 and bwd_flow.dim() == 4
+    assert fwd_flow.size(1) == 2 and bwd_flow.size(1) == 2
+    flow_mag = torch.norm(fwd_flow, dim=1) + torch.norm(bwd_flow, dim=1)  # [B, H, W]
+
+    warped_bwd_flow = flow_warp(bwd_flow, fwd_flow)  # [B, 2, H, W]
+    warped_fwd_flow = flow_warp(fwd_flow, bwd_flow)  # [B, 2, H, W]
+
+    diff_fwd = torch.norm(fwd_flow + warped_bwd_flow, dim=1)  # [B, H, W]
     diff_bwd = torch.norm(bwd_flow + warped_fwd_flow, dim=1)
+
     threshold = alpha * flow_mag + beta
-    fwd_occ = (diff_fwd > threshold).float()
+
+    fwd_occ = (diff_fwd > threshold).float()  # [B, H, W]
     bwd_occ = (diff_bwd > threshold).float()
+
     return fwd_occ, bwd_occ
 
 class InputPadder:
@@ -98,14 +108,14 @@ def get_warped_and_mask(flow_model, image1, image2, image3=None, pixel_consisten
     image1_padded, image2_padded = padder.pad(image1[None].to(device), image2[None].to(device))
     results_dict = flow_model(image1_padded, image2_padded, attn_splits_list=[2], corr_radius_list=[-1], prop_radius_list=[-1], pred_bidir_flow=True)
     flow_pr = results_dict["flow_preds"][-1]
-    fwd_flow = padder.unpad(flow_pr[0]).unsqueeze(0)
-    bwd_flow = padder.unpad(flow_pr[1]).unsqueeze(0)
-    fwd_occ, bwd_occ = forward_backward_consistency_check(fwd_flow, bwd_flow)
+    fwd_flow = padder.unpad(flow_pr[0]).unsqueeze(0)# [1, 2, H, W]
+    bwd_flow = padder.unpad(flow_pr[1]).unsqueeze(0)# [1, 2, H, W]
+    fwd_occ, bwd_occ = forward_backward_consistency_check(fwd_flow, bwd_flow) # shape:[1, H, W] float
     if pixel_consistency:
         warped_image1 = flow_warp(image1, bwd_flow)
         bwd_occ = torch.clamp(bwd_occ + (abs(image2 - warped_image1).mean(dim=1) > 255 * 0.25).float(), 0, 1).unsqueeze(0)
     warped_results = flow_warp(image3, bwd_flow)
-    return warped_results, bwd_occ.unsqueeze(0), bwd_flow
+    return warped_results, bwd_occ, bwd_flow
     
 # =========================================================================================
 # === The Video Style Transfer Pipeline ===
@@ -135,9 +145,10 @@ class StyleIDVideoPipeline(StyleIDPipeline):
 
         try:
             checkpoint = torch.hub.load_url(
-                "https://huggingface.co/Anonymous-sub/Rerender/resolve/main/models/gmflow_sintel-0c07dcb3.pth",
+                "https://huggingface.co/Anonymous-sub/Rerender/resolve/main/models/gmflow_with_refine_things-36579974.pth",
                 map_location=self.device,
             )
+            #here we use the gmflow_with_refine_things-36579974.pth, which is suitable for video style transfer
             weights = checkpoint["model"] if "model" in checkpoint else checkpoint
             self.flow_model.load_state_dict(weights, strict=False)
             print("GMFlow model loaded successfully.")
@@ -236,13 +247,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         style_cache = self.precompute_style(style_image, num_inference_steps)
         style_latents = style_cache["style_latents"]
         print("Step 2: Pre-computing content inversions and optical flows...")
-        content_inversions = []
-        for frame_tensor in tqdm(processed_content_frames, desc="Inverting Content Frames"):
-            self.state.to_invert_content()
-            self.state.content_features = {}
-            latents = self.encode_image(frame_tensor)
-            self.ddim_inversion(latents, text_embeddings)
-            content_inversions.append({"initial_latent": latents, "features": copy.deepcopy(self.state.content_features)})
+        
 
         flows = {}
         for i in range(1, len(processed_content_frames)):
@@ -269,10 +274,11 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             
             current_content_tensor = processed_content_frames[i] 
             prev_generated_frame_tensor = generated_frames_tensors[i-1]
-            
+            self.state.to_invert_content()
+            self.state.content_features = {}
             
             self.state.style_features = style_cache["style_features"]
-            self.state.content_features = content_inversions[i]["features"]
+            self.state.content_features = {}
             
             # Prepare initial latent for the current frame
             self.state.to_transfer()
@@ -283,7 +289,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
                 initial_latent = content_latent
             
             final_latent = self.denoising_loop_with_fusion(
-                initial_latent, current_content_tensor, text_embeddings, first_frame_tensor, prev_generated_frame_tensor, flows[i],
+                initial_latent, text_embeddings,current_content_tensor,  first_frame_tensor, prev_generated_frame_tensor, flows[i],
                 num_inference_steps, mask_strength, inner_strength
             )
             

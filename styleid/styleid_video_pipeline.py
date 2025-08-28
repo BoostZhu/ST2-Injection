@@ -1,5 +1,5 @@
 #  styleid/styleid_video_pipeline.py
-
+'''this is a previous dev version, it is not working'''
 import os
 import cv2
 import copy
@@ -105,7 +105,7 @@ def get_warped_and_mask(flow_model, image1, image2, image3=None, pixel_consisten
         warped_image1 = flow_warp(image1, bwd_flow)
         bwd_occ = torch.clamp(bwd_occ + (abs(image2 - warped_image1).mean(dim=1) > 255 * 0.25).float(), 0, 1).unsqueeze(0)
     warped_results = flow_warp(image3, bwd_flow)
-    return warped_results, bwd_occ.unsqueeze(0), bwd_flow
+    return warped_results, bwd_occ, bwd_flow
     
 # =========================================================================================
 # === The Video Style Transfer Pipeline ===
@@ -204,7 +204,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             
             final_occ_mask = 1 - torch.clamp((1 - bwd_occ_pre) + (1 - bwd_occ_0), 0, 1)
             final_blend_mask = blur(F.max_pool2d(final_occ_mask, kernel_size=9, stride=1, padding=4))
-            final_blend_mask = 1 - torch.clamp(final_blend_mask + final_occ_mask, 0, 1)
+            final_blend_mask = torch.clamp(final_blend_mask + final_occ_mask, 0, 1)
             
             fusion_mask_latent = 1.0-F.interpolate(final_blend_mask, size=current_latent.shape[-2:], mode='bilinear') * mask_strength
             
@@ -235,14 +235,8 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         print("Step 1: Pre-computing style inversion...")
         style_cache = self.precompute_style(style_image, num_inference_steps)
         style_latents = style_cache["style_latents"]
-        print("Step 2: Pre-computing content inversions and optical flows...")
-        content_inversions = []
-        for frame_tensor in tqdm(processed_content_frames, desc="Inverting Content Frames"):
-            self.state.to_invert_content()
-            self.state.content_features = {}
-            latents = self.encode_image(frame_tensor)
-            self.ddim_inversion(latents, text_embeddings)
-            content_inversions.append({"initial_latent": latents, "features": copy.deepcopy(self.state.content_features)})
+        print("Step 2: Pre-computing optical flows...")
+        
 
         flows = {}
         for i in range(1, len(processed_content_frames)):
@@ -256,7 +250,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
 
         # --- Generate Frame 0 (Anchor Frame without fusion) ---
         print("\nStep 3: Generating Frame 0 (Anchor Frame)...")
-        self.state.content_features = content_inversions[0]["features"]
+        
         first_frame_result = self.style_transfer(content_image=content_frames[0], style_image=style_image, num_inference_steps=num_inference_steps, gamma=gamma, temperature=temperature, without_init_adain=without_init_adain)
         
         output_frames_pil.append(first_frame_result.images[0])
@@ -294,8 +288,58 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             output_frames_pil.append(final_image_pil)
             generated_frames_tensors.append(final_image.detach().clone())
             
-        return {"images": output_frames_pil}
+        return {"images": output_frames_pil}#check if below can work and if it be written in functions easier to understand
+    '''for i in range(1, len(processed_content_frames)):
+            print(f"\nStep 4: Inverting and Generating Frame {i} with Temporal Fusion...")
+            
+            # --- On-the-fly Inversion for current frame ---
+            current_content_tensor = processed_content_frames[i]
+            self.state.to_invert_content()
+            self.state.content_features = {}
+            content_latent_i = self.encode_image(current_content_tensor)
+            self.ddim_inversion(content_latent_i, text_embeddings)
+            content_features_i = copy.deepcopy(self.state.content_features)
+            
+            # --- Prepare for Fusion Denoising ---
+            prev_generated_frame_tensor = generated_frames_tensors[i-1]
+            
+            self.state.to_transfer()
+            self.state.style_features = style_cache["style_features"]
+            self.state.content_features = content_features_i
+            
+            if not without_init_adain:
+                initial_latent = (content_latent_i - content_latent_i.mean(dim=(2,3), keepdim=True)) / \
+                            (content_latent_i.std(dim=(2,3), keepdim=True) + 1e-4) * \
+                            style_latents_list[0].std(dim=(2,3), keepdim=True) + \
+                            style_latents_list[0].mean(dim=(2,3), keepdim=True)
+            else:
+                initial_latent = content_latent_i
+            
+            # Run the denoising loop with fusion logic
+            final_latent = self.denoising_loop_with_fusion(
+                initial_latent=initial_latent,
+                content_image_tensor=current_content_tensor,
+                text_embeddings=text_embeddings, 
+                anchor_frame_tensor=first_frame_tensor, 
+                prev_frame_tensor=prev_generated_frame_tensor, 
+                flow_data=flows[i],
+                num_inference_steps=num_inference_steps, 
+                mask_strength=mask_strength
+            )
+            
+            with torch.no_grad():
+                final_image_tensor = self.decode_latent(final_latent)
+            
+            final_image_pil = self.image_processor.postprocess(final_image_tensor, output_type=output_type, do_denormalize=[True])[0]
+            output_frames_pil.append(final_image_pil)
+            
+            generated_frames_tensors.append(final_image_tensor.detach().clone())
+            
+            # --- Memory Cleanup (optional but good practice) ---
+            del content_features_i
+            torch.cuda.empty_cache()
 
+        return {"images": output_frames_pil}'''
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         # This is a helper to load the pipeline easily
