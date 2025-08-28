@@ -1,3 +1,4 @@
+#./run_styleid_v2v.py
 import os
 import argparse
 import glob

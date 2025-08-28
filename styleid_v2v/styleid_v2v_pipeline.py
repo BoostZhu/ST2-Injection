@@ -1,4 +1,4 @@
-# styleid_v2v/styleid_v2v_pipeline.py
+# ./styleid_v2v/styleid_v2v_pipeline.py
 
 import os
 import cv2
@@ -12,19 +12,30 @@ from tqdm.auto import tqdm
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 # 导入 Diffusers 和 Transformers 的核心组件
-from diffusers import DDIMScheduler, AutoencoderKL, UNet2DConditionModel
+from diffusers import DDIMScheduler, AutoencoderKL, UNet2DConditionModel,DiffusionPipeline
 from transformers import CLIPTextModel, CLIPTokenizer
 
 # 导入我们自己的父类 Pipeline 和辅助函数
-from ..styleid.styleid_pipeline import StyleIDPipeline, normalize, denormalize
+from styleid.styleid_pipeline import StyleIDPipeline, normalize, denormalize
 
 # 导入 GMFlow
+import sys
+from pathlib import Path
+
+
+gmflow_path = str(Path(__file__).resolve().parents[1] / 'gmflow')
+
+
+
+if gmflow_path not in sys.path:
+    sys.path.append(gmflow_path)
+
 try:
     from gmflow.gmflow import GMFlow
     GMFlow_installed = True
-except ImportError:
-    print("Warning: GMFlow is not installed. Temporal consistency features will not be available.")
-    print("Please install it using: pip install git+https://github.com/haofeixu/gmflow.git")
+except ImportError as e:
+    print(f"Warning: GMFlow is not installed. Temporal consistency features will not be available.")
+    print(f"ImportError details: {e}") 
     GMFlow_installed = False
 
 blur = T.GaussianBlur(kernel_size=(9, 9), sigma=(18, 18))
@@ -114,9 +125,30 @@ def get_warped_and_mask(flow_model, image1, image2, image3, device=None):
 # =========================================================================================
 
 class StyleIDVideoPipeline(StyleIDPipeline):
-    def __init__(self, vae, text_encoder, tokenizer, unet, scheduler, **kwargs):
-        # 1. Inherit parent's  __init__ to complete StyleID basic settings
-        super().__init__(vae, text_encoder, tokenizer, unet, scheduler, **kwargs)
+    def __init__(
+        self, 
+        vae, 
+        text_encoder, 
+        tokenizer, 
+        unet, 
+        scheduler,
+        safety_checker=None, 
+        feature_extractor=None, 
+        image_encoder=None,
+        requires_safety_checker: bool = True, #  must have this
+    ):
+        # Pass all arguments up to the parent StyleIDPipeline
+        super().__init__(
+            vae=vae, 
+            text_encoder=text_encoder, 
+            tokenizer=tokenizer, 
+            unet=unet, 
+            scheduler=scheduler,
+            safety_checker=safety_checker, 
+            feature_extractor=feature_extractor,
+            image_encoder=image_encoder, 
+            requires_safety_checker=requires_safety_checker #  Pass it along
+        )
         
         # 2. add GMFlow optical flow pretrained model for image preprocess
         if not GMFlow_installed:
@@ -131,10 +163,10 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         self.flow_model.eval()
 
         try:
-            checkpoint = torch.hub.load_url(
-                "https://huggingface.co/Anonymous-sub/Rerender/resolve/main/models/gmflow_with_refine_things-36579974.pth",
-                map_location=self.device,
-            )
+            local_gmflow_path = "gmflow/gmflow_sintel-0c07dcb3.pth"
+            print(f"Loading GMFlow model from local path: {local_gmflow_path}")
+            checkpoint = torch.load(local_gmflow_path, map_location=self.device)
+
             weights = checkpoint["model"] if "model" in checkpoint else checkpoint
             self.flow_model.load_state_dict(weights, strict=False)
             print("GMFlow model loaded successfully.")
