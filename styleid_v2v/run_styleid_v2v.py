@@ -103,7 +103,7 @@ if __name__ == "__main__":
     
     # --- 其他选项 ---
     parser.add_argument("--without_init_adain", action="store_true", help="禁用初始latent的AdaIN操作")
-    parser.add_argument("--fps", type=int, default=10, help="输出GIF的帧率 (此版本中已不使用)")
+    
 
     args = parser.parse_args()
     main(args)
