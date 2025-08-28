@@ -1,4 +1,4 @@
-#  styleid/styleid_video_pipeline.py
+# styleid_v2v/styleid_v2v_pipeline.py
 
 import os
 import cv2
@@ -13,11 +13,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 # 导入 Diffusers 和 Transformers 的核心组件
 from diffusers import DDIMScheduler, AutoencoderKL, UNet2DConditionModel
-from diffusers.models.attention_processor import AttnProcessor
 from transformers import CLIPTextModel, CLIPTokenizer
 
-# 导入我们自己的父类 Pipeline
-from .styleid_pipeline import StyleIDPipeline, normalize, denormalize
+# 导入我们自己的父类 Pipeline 和辅助函数
+from ..styleid.styleid_pipeline import StyleIDPipeline, normalize, denormalize
 
 # 导入 GMFlow
 try:
@@ -28,11 +27,9 @@ except ImportError:
     print("Please install it using: pip install git+https://github.com/haofeixu/gmflow.git")
     GMFlow_installed = False
 
-
- 
-
 blur = T.GaussianBlur(kernel_size=(9, 9), sigma=(18, 18))
 
+# === 光流计算相关辅助函数 (来自 Rerender-A-Video) ===
 def coords_grid(b, h, w, homogeneous=False, device=None):
     y, x = torch.meshgrid(torch.arange(h, device=device), torch.arange(w, device=device), indexing="ij")
     stacks = [x, y]
@@ -64,27 +61,19 @@ def flow_warp(feature, flow, mask=False, mode="bilinear", padding_mode="zeros"):
     return bilinear_sample(feature, grid, mode=mode, padding_mode=padding_mode, return_mask=mask)
 
 def forward_backward_consistency_check(fwd_flow, bwd_flow, alpha=0.01, beta=0.5):
-    # fwd_flow, bwd_flow: [B, 2, H, W]
-    # alpha and beta values are following UnFlow
-    # (https://huggingface.co/papers/1711.07837)
-    assert fwd_flow.dim() == 4 and bwd_flow.dim() == 4
-    assert fwd_flow.size(1) == 2 and bwd_flow.size(1) == 2
-    flow_mag = torch.norm(fwd_flow, dim=1) + torch.norm(bwd_flow, dim=1)  # [B, H, W]
-
-    warped_bwd_flow = flow_warp(bwd_flow, fwd_flow)  # [B, 2, H, W]
-    warped_fwd_flow = flow_warp(fwd_flow, bwd_flow)  # [B, 2, H, W]
-
-    diff_fwd = torch.norm(fwd_flow + warped_bwd_flow, dim=1)  # [B, H, W]
+    flow_mag = torch.norm(fwd_flow, dim=1) + torch.norm(bwd_flow, dim=1)
+    warped_bwd_flow = flow_warp(bwd_flow, fwd_flow)
+    warped_fwd_flow = flow_warp(fwd_flow, bwd_flow)
+    diff_fwd = torch.norm(fwd_flow + warped_bwd_flow, dim=1)
     diff_bwd = torch.norm(bwd_flow + warped_fwd_flow, dim=1)
-
     threshold = alpha * flow_mag + beta
-
-    fwd_occ = (diff_fwd > threshold).float()  # [B, H, W]
+    fwd_occ = (diff_fwd > threshold).float()
     bwd_occ = (diff_bwd > threshold).float()
-
     return fwd_occ, bwd_occ
 
 class InputPadder:
+    """Pads images such that dimensions are divisible by 8"""
+
     def __init__(self, dims, mode="sintel", padding_factor=8):
         self.ht, self.wd = dims[-2:]
         pad_ht = (((self.ht // padding_factor) + 1) * padding_factor - self.ht) % padding_factor
@@ -93,45 +82,43 @@ class InputPadder:
             self._pad = [pad_wd // 2, pad_wd - pad_wd // 2, pad_ht // 2, pad_ht - pad_ht // 2]
         else:
             self._pad = [pad_wd // 2, pad_wd - pad_wd // 2, 0, pad_ht]
+
     def pad(self, *inputs):
         return [F.pad(x, self._pad, mode="replicate") for x in inputs]
+
     def unpad(self, x):
         ht, wd = x.shape[-2:]
         c = [self._pad[2], ht - self._pad[3], self._pad[0], wd - self._pad[1]]
         return x[..., c[0] : c[1], c[2] : c[3]]
 
+
 @torch.no_grad()
-def get_warped_and_mask(flow_model, image1, image2, image3=None, pixel_consistency=False, device=None):
-    if image3 is None:
-        image3 = image1
+def get_warped_and_mask(flow_model, image1, image2, image3, device=None):
     padder = InputPadder(image1.shape, padding_factor=8)
-    image1_padded, image2_padded = padder.pad(image1[None].to(device), image2[None].to(device))
+    # Ensure images are 4D tensors for processing
+    image1_padded, image2_padded = padder.pad(image1.unsqueeze(0), image2.unsqueeze(0))
+    
     results_dict = flow_model(image1_padded, image2_padded, attn_splits_list=[2], corr_radius_list=[-1], prop_radius_list=[-1], pred_bidir_flow=True)
     flow_pr = results_dict["flow_preds"][-1]
-    fwd_flow = padder.unpad(flow_pr[0]).unsqueeze(0)# [1, 2, H, W]
-    bwd_flow = padder.unpad(flow_pr[1]).unsqueeze(0)# [1, 2, H, W]
-    fwd_occ, bwd_occ = forward_backward_consistency_check(fwd_flow, bwd_flow) # shape:[1, H, W] float
-    if pixel_consistency:
-        warped_image1 = flow_warp(image1, bwd_flow)
-        bwd_occ = torch.clamp(bwd_occ + (abs(image2 - warped_image1).mean(dim=1) > 255 * 0.25).float(), 0, 1).unsqueeze(0)
-    warped_results = flow_warp(image3, bwd_flow)
-    return warped_results, bwd_occ, bwd_flow
+    
+    fwd_flow = padder.unpad(flow_pr[0]).unsqueeze(0)
+    bwd_flow = padder.unpad(flow_pr[1]).unsqueeze(0)
+    
+    fwd_occ, bwd_occ = forward_backward_consistency_check(fwd_flow, bwd_flow)
+    
+    warped_results = flow_warp(image3.unsqueeze(0), bwd_flow)
+    return warped_results.squeeze(0), bwd_occ.squeeze(0), bwd_flow.squeeze(0)
     
 # =========================================================================================
-# === The Video Style Transfer Pipeline ===
+# === Video Style Transfer Pipeline ===
 # =========================================================================================
 
 class StyleIDVideoPipeline(StyleIDPipeline):
-    """
-    A pipeline for video style transfer that inherits from StyleIDPipeline
-    and integrates temporal consistency mechanisms from Rerender-A-Video.
-    """
-    
     def __init__(self, vae, text_encoder, tokenizer, unet, scheduler, **kwargs):
-        # 1. 调用父类 __init__ 完成所有 StyleID 的基础设置
+        # 1. Inherit parent's  __init__ to complete StyleID basic settings
         super().__init__(vae, text_encoder, tokenizer, unet, scheduler, **kwargs)
         
-        # 2. 添加 GMFlow 模型用于视频处理
+        # 2. add GMFlow optical flow pretrained model for image preprocess
         if not GMFlow_installed:
             self.flow_model = None
             return
@@ -148,7 +135,6 @@ class StyleIDVideoPipeline(StyleIDPipeline):
                 "https://huggingface.co/Anonymous-sub/Rerender/resolve/main/models/gmflow_with_refine_things-36579974.pth",
                 map_location=self.device,
             )
-            #here we use the gmflow_with_refine_things-36579974.pth, which is suitable for video style transfer
             weights = checkpoint["model"] if "model" in checkpoint else checkpoint
             self.flow_model.load_state_dict(weights, strict=False)
             print("GMFlow model loaded successfully.")
@@ -157,10 +143,9 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             self.flow_model = None
 
     @torch.no_grad()
-    def fidelity_oriented_encode(self, image_tensor: torch.Tensor, low_error_threshold: float = 0.05) -> torch.Tensor:
+    def fidelity_oriented_encode(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Implements the fidelity-oriented image encoding (ε*) from Rerender-A-Video.
-        This minimizes information loss from VAE encoding/decoding cycles.
+        Implements a simplified fidelity-oriented image encoding from Rerender-A-Video.
         """
         if image_tensor.dim() == 3:
             image_tensor = image_tensor.unsqueeze(0)
@@ -170,67 +155,75 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         x_rr = self.vae.encode(I_r).latent_dist.sample()
         
         compensation = x_r - x_rr
-        x_prime = x_r + compensation
-        I_prime = self.vae.decode(x_prime).sample
-        
-        error = torch.abs(image_tensor - I_prime).mean(dim=1, keepdim=True)
-        M_epsilon = (error < low_error_threshold).float()
-        
-        final_latent = x_r + M_epsilon * compensation
+        final_latent = x_r + compensation
         return final_latent * self.vae.config.scaling_factor
 
     @torch.no_grad()
-    def denoising_loop_with_fusion(self, initial_latent, text_embeddings, anchor_frame_tensor, prev_frame_tensor, flow_data, num_inference_steps, mask_strength, inner_strength):
-        """
-        The core denoising loop that combines StyleID with Pixel-Aware Fusion.
-        """
+    def denoising_loop_with_fusion(
+        self, 
+        initial_latent: torch.Tensor,
+        text_embeddings: torch.Tensor,
+        is_anchor_frame: bool,
+        # --- 融合所需的数据 ---
+        original_anchor_frame: torch.Tensor,
+        original_prev_frame: torch.Tensor,
+        original_current_frame: torch.Tensor,
+        stylized_anchor_frame: torch.Tensor,
+        stylized_prev_frame: torch.Tensor,
+        # --- 其他参数 ---
+        num_inference_steps: int,
+        mask_strength: float
+    ):
         self.scheduler.set_timesteps(num_inference_steps, device=self.device)
         current_latent = initial_latent
 
-        # Pre-calculate warp and masks outside the loop for efficiency
-        warped_anchor, _, _ = get_warped_and_mask(self.flow_model, anchor_frame_tensor, content_image_tensor=None, image3=anchor_frame_tensor, device=self.device)
-        warped_prev, _, _ = get_warped_and_mask(self.flow_model, prev_frame_tensor, content_image_tensor=None, image3=prev_frame_tensor, device=self.device)
+        timesteps = self.scheduler.timesteps
+        num_steps = len(timesteps)
+        fusion_start_step = int(num_steps * 0.5)
+        fusion_end_step = int(num_steps * 0.8)
 
-        bwd_occ_0 = flow_data["bwd_occ_0"]
-        bwd_occ_pre = flow_data["bwd_occ_pre"]
-        
-        blend_mask_0 = blur(F.max_pool2d(bwd_occ_0, kernel_size=9, stride=1, padding=4))
-        blend_mask_0 = torch.clamp(blend_mask_0 + bwd_occ_0, 0, 1)
-
-        blend_mask_pre = blur(F.max_pool2d(bwd_occ_pre, kernel_size=9, stride=1, padding=4))
-        blend_mask_pre = torch.clamp(blend_mask_pre + bwd_occ_pre, 0, 1)
-
-        for t in tqdm(self.scheduler.timesteps, desc="Denoising with Fusion"):
+        for i, t in enumerate(tqdm(timesteps, desc="Denoising")):
             self.state.set_timestep(t.item())
 
-            # --- Pixel-Aware Fusion ---
             noise_pred_unfused = self.unet(current_latent, t, encoder_hidden_states=text_embeddings).sample
-            pred_x0_unfused = self.scheduler.step(noise_pred_unfused, t, current_latent).pred_original_sample
-            direct_result_img = self.decode_latent(pred_x0_unfused)
-            
-            blend_results = (1 - blend_mask_pre) * warped_prev + blend_mask_pre * direct_result_img
-            blend_results = (1 - blend_mask_0) * warped_anchor + blend_mask_0 * blend_results
-            
-            xtrg = self.fidelity_oriented_encode(blend_results)
-            
-            final_occ_mask = 1 - torch.clamp((1 - bwd_occ_pre) + (1 - bwd_occ_0), 0, 1)
-            final_blend_mask = blur(F.max_pool2d(final_occ_mask, kernel_size=9, stride=1, padding=4))
-            final_blend_mask = 1 - torch.clamp(final_blend_mask + final_occ_mask, 0, 1)
-            
-            fusion_mask_latent = 1.0-F.interpolate(final_blend_mask, size=current_latent.shape[-2:], mode='bilinear') * mask_strength
-            
-            noise = torch.randn_like(current_latent)
-            latents_ref = self.scheduler.add_noise(xtrg, noise, t)
-            
-            fused_latent = current_latent * fusion_mask_latent + latents_ref * (1 - fusion_mask_latent)
-            
-            # --- Standard StyleID Denoising Step on the fused latent ---
-            noise_pred = self.unet(fused_latent, t, encoder_hidden_states=text_embeddings).sample
-            current_latent = self.scheduler.step(noise_pred, t, fused_latent).prev_sample
+
+            if not is_anchor_frame and fusion_start_step <= i < fusion_end_step:
+                pred_x0_unfused = self.scheduler.step(noise_pred_unfused, t, current_latent).pred_original_sample
+                direct_result_img = self.decode_latent(pred_x0_unfused).squeeze(0)
+                
+                warped_anchor, bwd_occ_0, _ = get_warped_and_mask(self.flow_model, original_anchor_frame, original_current_frame, stylized_anchor_frame, device=self.device)
+                warped_prev, bwd_occ_pre, _ = get_warped_and_mask(self.flow_model, original_prev_frame, original_current_frame, stylized_prev_frame, device=self.device)
+
+                blend_mask_0 = blur(F.max_pool2d(bwd_occ_0.unsqueeze(0).unsqueeze(0), kernel_size=9, stride=1, padding=4)).squeeze()
+                blend_mask_0 = torch.clamp(blend_mask_0 + bwd_occ_0, 0, 1)
+                
+                blend_mask_pre = blur(F.max_pool2d(bwd_occ_pre.unsqueeze(0).unsqueeze(0), kernel_size=9, stride=1, padding=4)).squeeze()
+                blend_mask_pre = torch.clamp(blend_mask_pre + bwd_occ_pre, 0, 1)
+
+                blend_results = (1 - blend_mask_pre) * warped_prev + blend_mask_pre * direct_result_img
+                blend_results = (1 - blend_mask_0) * warped_anchor + blend_mask_0 * blend_results
+                
+                xtrg = self.fidelity_oriented_encode(blend_results)
+                
+                final_occ_mask = 1 - torch.clamp((1 - bwd_occ_pre) + (1 - bwd_occ_0), 0, 1)
+                final_blend_mask = blur(F.max_pool2d(final_occ_mask.unsqueeze(0).unsqueeze(0), kernel_size=9, stride=1, padding=4)).squeeze()
+                final_blend_mask = 1 - torch.clamp(final_blend_mask + final_occ_mask, 0, 1)
+                
+                fusion_mask_latent = 1.0 - F.interpolate(final_blend_mask.unsqueeze(0).unsqueeze(0), size=current_latent.shape[-2:], mode='bilinear') * mask_strength
+                
+                noise = torch.randn_like(current_latent)
+                latents_ref = self.scheduler.add_noise(xtrg, noise, t)
+                
+                fused_latent = current_latent * fusion_mask_latent + latents_ref * (1 - fusion_mask_latent)
+                
+                noise_pred = self.unet(fused_latent, t, encoder_hidden_states=text_embeddings).sample
+                current_latent = self.scheduler.step(noise_pred, t, fused_latent).prev_sample
+            else:
+                current_latent = self.scheduler.step(noise_pred_unfused, t, current_latent).prev_sample
             
         return current_latent
 
-    def style_transfer_video(self, content_frames: List[np.ndarray], style_image: np.ndarray, num_inference_steps: int = 50, gamma=0.75, temperature=1.5, without_init_adain=False, mask_strength: float = 0.7, inner_strength: float = 0.9, output_type="pil"):
+    def style_transfer_video(self, content_frames: List[np.ndarray], style_image: np.ndarray, num_inference_steps: int = 50, gamma=0.75, temperature=1.5, without_init_adain=False, mask_strength: float = 0.7, output_type="pil"):
         if self.flow_model is None:
             raise ImportError("GMFlow model is not loaded. Cannot perform video style transfer.")
 
@@ -238,79 +231,68 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         self.update_parameters(gamma=gamma, temperature=temperature, without_init_adain=without_init_adain)
         device = self.device
         
-        processed_content_frames = [normalize(frame).to(device=device, dtype=self.vae.dtype) for frame in content_frames]
-        
+        processed_content_frames = [normalize(frame).to(device=device, dtype=self.vae.dtype).squeeze(0) for frame in content_frames]
         text_embeddings = self.get_text_embedding()
 
-        # 2. PRE-COMPUTATION
-        print("Step 1: Pre-computing style inversion...")
+        # 2. PRE-COMPUTATION (仅风格)
+        # 使用父类的 precompute_style 方法，它会处理好风格反转并缓存特征和latents
         style_cache = self.precompute_style(style_image, num_inference_steps)
+        self.state.style_features = style_cache["style_features"]
         style_latents = style_cache["style_latents"]
-        print("Step 2: Pre-computing content inversions and optical flows...")
-        
 
-        flows = {}
-        for i in range(1, len(processed_content_frames)):
-            _, bwd_occ_pre, bwd_flow_pre = get_warped_and_mask(self.flow_model, processed_content_frames[i-1], processed_content_frames[i], device=self.device)
-            _, bwd_occ_0, bwd_flow_0 = get_warped_and_mask(self.flow_model, processed_content_frames[0], processed_content_frames[i], device=self.device)
-            flows[i] = {"bwd_flow_pre": bwd_flow_pre, "bwd_occ_pre": bwd_occ_pre, "bwd_flow_0": bwd_flow_0, "bwd_occ_0": bwd_occ_0}
-
-        # 3. FRAME-BY-FRAME GENERATION
+        # 3. 统一的逐帧生成循环
         output_frames_pil = []
         generated_frames_tensors = []
 
-        # --- Generate Frame 0 (Anchor Frame without fusion) ---
-        print("\nStep 3: Generating Frame 0 (Anchor Frame)...")
-        self.state.content_features = content_inversions[0]["features"]
-        first_frame_result = self.style_transfer(content_image=content_frames[0], style_image=style_image, num_inference_steps=num_inference_steps, gamma=gamma, temperature=temperature, without_init_adain=without_init_adain)
-        
-        output_frames_pil.append(first_frame_result.images[0])
-        first_frame_tensor = normalize(np.array(first_frame_result.images[0])).to(device=device, dtype=self.vae.dtype)
-        generated_frames_tensors.append(first_frame_tensor)
-        
-        # --- Generate Subsequent Frames with Fusion ---
-        for i in range(1, len(processed_content_frames)):
-            print(f"\nStep 4: Generating Frame {i} with Temporal Fusion...")
+        for i in range(len(processed_content_frames)):
+            is_anchor_frame = (i == 0)
+            print(f"\nProcessing Frame {i} {'(Anchor Frame)' if is_anchor_frame else ''}...")
             
-            current_content_tensor = processed_content_frames[i] 
-            prev_generated_frame_tensor = generated_frames_tensors[i-1]
+            current_content_tensor = processed_content_frames[i]
+            content_latent = self.encode_image(current_content_tensor.unsqueeze(0))
+
+            # --- 即时反转 (On-the-fly Inversion) ---
+            print(f"  - Step 2.{i}: Inverting content frame {i}...")
             self.state.to_invert_content()
-            self.state.content_features = {}
+            # 使用父类的 ddim_inversion 方法，它会通过AttnProcessor自动填充 self.state.content_features
+            content_latents = self.ddim_inversion(content_latent, text_embeddings)
             
-            self.state.style_features = style_cache["style_features"]
-            self.state.content_features = {}
-            
-            # Prepare initial latent for the current frame
-            self.state.to_transfer()
-            content_latent = self.encode_image(current_content_tensor)
+            # --- 准备初始Latent ---
+            print(f"  - Step 3.{i}: Preparing initial latent...")
+            self.state.to_transfer() # 切换到迁移模式
             if not self.without_init_adain:
-                initial_latent = (content_latent - content_latent.mean(dim=(2,3), keepdim=True)) / (content_latent.std(dim=(2,3), keepdim=True) + 1e-4) * style_latents[0].std(dim=(2,3), keepdim=True) + style_latents[0].mean(dim=(2,3), keepdim=True)
+                initial_latent = (content_latents[0] - content_latents[0].mean(dim=(2,3), keepdim=True)) / (content_latents[0].std(dim=(2,3), keepdim=True) + 1e-4) * style_latents[0].std(dim=(2,3), keepdim=True) + style_latents[0].mean(dim=(2,3), keepdim=True)
             else:
-                initial_latent = content_latent
+                initial_latent = content_latents[0]
             
+            # --- 准备融合所需的数据 ---
+            original_anchor_frame = processed_content_frames[0]
+            original_prev_frame = None if is_anchor_frame else processed_content_frames[i-1]
+            stylized_anchor_frame = None if is_anchor_frame else generated_frames_tensors[0]
+            stylized_prev_frame = None if is_anchor_frame else generated_frames_tensors[i-1]
+
+            # --- 执行Denoising循环 ---
+            print(f"  - Step 4.{i}: Denoising...")
             final_latent = self.denoising_loop_with_fusion(
-                initial_latent, text_embeddings,current_content_tensor,  first_frame_tensor, prev_generated_frame_tensor, flows[i],
-                num_inference_steps, mask_strength, inner_strength
+                initial_latent=initial_latent,
+                text_embeddings=text_embeddings,
+                is_anchor_frame=is_anchor_frame,
+                original_anchor_frame=original_anchor_frame,
+                original_prev_frame=original_prev_frame,
+                original_current_frame=current_content_tensor,
+                stylized_anchor_frame=stylized_anchor_frame,
+                stylized_prev_frame=stylized_prev_frame,
+                num_inference_steps=num_inference_steps,
+                mask_strength=mask_strength
             )
             
+            # --- 解码并保存结果 ---
             with torch.no_grad():
-                final_image = self.decode_latent(final_latent)
+                final_image_tensor = self.decode_latent(final_latent)
             
-            final_image_pil = self.image_processor.postprocess(final_image, output_type=output_type, do_denormalize=[True])[0]
+            final_image_pil = self.image_processor.postprocess(final_image_tensor, output_type=output_type, do_denormalize=[True])[0]
             output_frames_pil.append(final_image_pil)
-            generated_frames_tensors.append(final_image.detach().clone())
+            generated_frames_tensors.append(final_image_tensor.detach().clone().squeeze(0))
             
         return {"images": output_frames_pil}
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        # This is a helper to load the pipeline easily
-        torch_dtype = kwargs.pop("torch_dtype", torch.float32)
-        
-        vae = AutoencoderKL.from_pretrained(pretrained_model_name_or_path, subfolder="vae", torch_dtype=torch_dtype)
-        text_encoder = CLIPTextModel.from_pretrained(pretrained_model_name_or_path, subfolder="text_encoder", torch_dtype=torch_dtype)
-        tokenizer = CLIPTokenizer.from_pretrained(pretrained_model_name_or_path, subfolder="tokenizer")
-        unet = UNet2DConditionModel.from_pretrained(pretrained_model_name_or_path, subfolder="unet", torch_dtype=torch_dtype)
-        scheduler = DDIMScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
-        
-        return cls(vae, text_encoder, tokenizer, unet, scheduler, **kwargs)
