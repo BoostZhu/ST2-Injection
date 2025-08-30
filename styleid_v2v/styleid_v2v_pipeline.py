@@ -104,21 +104,25 @@ class InputPadder:
 
 
 @torch.no_grad()
-def get_warped_and_mask(flow_model, image1, image2, image3, device=None):
+def get_warped_and_mask(flow_model, image1, image2, image3=None, pixel_consistency=False, device=None):
+    if image3 is None:
+        image3 = image1
     padder = InputPadder(image1.shape, padding_factor=8)
-    # Ensure images are 4D tensors for processing
-    image1_padded, image2_padded = padder.pad(image1.unsqueeze(0), image2.unsqueeze(0))
-    
-    results_dict = flow_model(image1_padded, image2_padded, attn_splits_list=[2], corr_radius_list=[-1], prop_radius_list=[-1], pred_bidir_flow=True)
-    flow_pr = results_dict["flow_preds"][-1]
-    
-    fwd_flow = padder.unpad(flow_pr[0]).unsqueeze(0)
-    bwd_flow = padder.unpad(flow_pr[1]).unsqueeze(0)
-    
-    fwd_occ, bwd_occ = forward_backward_consistency_check(fwd_flow, bwd_flow)
-    
-    warped_results = flow_warp(image3.unsqueeze(0), bwd_flow)
-    return warped_results.squeeze(0), bwd_occ.squeeze(0), bwd_flow.squeeze(0)
+    image1, image2 = padder.pad(image1[None].to(device), image2[None].to(device))
+    results_dict = flow_model(
+        image1, image2, attn_splits_list=[2], corr_radius_list=[-1], prop_radius_list=[-1], pred_bidir_flow=True
+    )
+    flow_pr = results_dict["flow_preds"][-1]  # [B, 2, H, W]
+    fwd_flow = padder.unpad(flow_pr[0]).unsqueeze(0)  # [1, 2, H, W]
+    bwd_flow = padder.unpad(flow_pr[1]).unsqueeze(0)  # [1, 2, H, W]
+    fwd_occ, bwd_occ = forward_backward_consistency_check(fwd_flow, bwd_flow)  # [1, H, W] float
+    if pixel_consistency:
+        warped_image1 = flow_warp(image1, bwd_flow)
+        bwd_occ = torch.clamp(
+            bwd_occ + (abs(image2 - warped_image1).mean(dim=1) > 255 * 0.25).float(), 0, 1
+        ).unsqueeze(0)
+    warped_results = flow_warp(image3, bwd_flow)
+    return warped_results, bwd_occ, bwd_flow
     
 # =========================================================================================
 # === Video Style Transfer Pipeline ===
@@ -156,24 +160,39 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             return
             
         print("Loading GMFlow model for video processing...")
-        self.flow_model = GMFlow(
-            feature_channels=128, num_scales=1, upsample_factor=8, num_head=1,
-            attention_type="swin", ffn_dim_expansion=4, num_transformer_layers=6,
-        ).to(self.device)
-        self.flow_model.eval()
-
         try:
-            local_gmflow_path = "gmflow/gmflow_sintel-0c07dcb3.pth"
+            # 步骤 1: 在 CPU 上创建模型实例 (注意：这里不要 .to(self.device))
+            flow_model = GMFlow(
+                feature_channels=128, num_scales=1, upsample_factor=8, num_head=1,
+                attention_type="swin", ffn_dim_expansion=4, num_transformer_layers=6,
+            ).to(self.device)
+
+            # 步骤 2: 从文件加载权重，并确保权重数据也放在 CPU 上
+            local_gmflow_path = "gmflow/pretrained/gmflow_sintel-0c07dcb3.pth"
             print(f"Loading GMFlow model from local path: {local_gmflow_path}")
-            checkpoint = torch.load(local_gmflow_path, map_location=self.device)
+            checkpoint = torch.load(local_gmflow_path, map_location=lambda storage, loc: storage,
+        )
 
             weights = checkpoint["model"] if "model" in checkpoint else checkpoint
-            self.flow_model.load_state_dict(weights, strict=False)
-            print("GMFlow model loaded successfully.")
+            
+            # 步骤 3: 将 CPU 上的权重加载到 CPU 上的模型里
+            flow_model.load_state_dict(weights, strict=False)
+
+            # 步骤 4: 所有东西都准备好后，将完整的模型一次性移动到 GPU
+            flow_model.to(self.device)
+            flow_model.eval()
+            self.flow_model=flow_model
+            print(f"GMFlow model loaded successfully and is on device: {next(self.flow_model.parameters()).device}")
+
         except Exception as e:
             print(f"ERROR: Could not load GMFlow model weights. Temporal consistency will fail. Error: {e}")
             self.flow_model = None
-
+    def to(self, torch_device):
+        
+        super().to(torch_device)
+        if self.flow_model is not None:
+            self.flow_model.to(torch_device)
+        return self
     @torch.no_grad()
     def fidelity_oriented_encode(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -220,29 +239,31 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             noise_pred_unfused = self.unet(current_latent, t, encoder_hidden_states=text_embeddings).sample
 
             if not is_anchor_frame and fusion_start_step <= i < fusion_end_step:
-                pred_x0_unfused = self.scheduler.step(noise_pred_unfused, t, current_latent).pred_original_sample
+                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                beta_prod_t = 1 - alpha_prod_t
+                pred_x0_unfused = (current_latent - beta_prod_t ** (0.5) * noise_pred_unfused) / alpha_prod_t ** (0.5)
                 direct_result_img = self.decode_latent(pred_x0_unfused).squeeze(0)
                 
                 warped_anchor, bwd_occ_0, _ = get_warped_and_mask(self.flow_model, original_anchor_frame, original_current_frame, stylized_anchor_frame, device=self.device)
                 warped_prev, bwd_occ_pre, _ = get_warped_and_mask(self.flow_model, original_prev_frame, original_current_frame, stylized_prev_frame, device=self.device)
 
-                blend_mask_0 = blur(F.max_pool2d(bwd_occ_0.unsqueeze(0).unsqueeze(0), kernel_size=9, stride=1, padding=4)).squeeze()
+                blend_mask_0 = blur(F.max_pool2d(bwd_occ_0.unsqueeze(1), kernel_size=9, stride=1, padding=4)).squeeze()
                 blend_mask_0 = torch.clamp(blend_mask_0 + bwd_occ_0, 0, 1)
                 
-                blend_mask_pre = blur(F.max_pool2d(bwd_occ_pre.unsqueeze(0).unsqueeze(0), kernel_size=9, stride=1, padding=4)).squeeze()
+                blend_mask_pre = blur(F.max_pool2d(bwd_occ_pre.unsqueeze(1), kernel_size=9, stride=1, padding=4)).squeeze()
                 blend_mask_pre = torch.clamp(blend_mask_pre + bwd_occ_pre, 0, 1)
 
                 blend_results = (1 - blend_mask_pre) * warped_prev + blend_mask_pre * direct_result_img
                 blend_results = (1 - blend_mask_0) * warped_anchor + blend_mask_0 * blend_results
                 
-                xtrg = self.fidelity_oriented_encode(blend_results)
+                xtrg = self.fidelity_oriented_encode(blend_results.to(self.vae.dtype))
                 
                 final_occ_mask = 1 - torch.clamp((1 - bwd_occ_pre) + (1 - bwd_occ_0), 0, 1)
-                final_blend_mask = blur(F.max_pool2d(final_occ_mask.unsqueeze(0).unsqueeze(0), kernel_size=9, stride=1, padding=4)).squeeze()
+                final_blend_mask = blur(F.max_pool2d(final_occ_mask.unsqueeze(1), kernel_size=9, stride=1, padding=4)).squeeze()
                 final_blend_mask = 1 - torch.clamp(final_blend_mask + final_occ_mask, 0, 1)
                 
-                fusion_mask_latent = 1.0 - F.interpolate(final_blend_mask.unsqueeze(0).unsqueeze(0), size=current_latent.shape[-2:], mode='bilinear') * mask_strength
-                
+                fusion_mask_latent = 1.0 - F.interpolate(final_blend_mask.unsqueeze(1), size=current_latent.shape[-2:], mode='bilinear') * mask_strength
+                fusion_mask_latent = fusion_mask_latent.to(current_latent.dtype)
                 noise = torch.randn_like(current_latent)
                 latents_ref = self.scheduler.add_noise(xtrg, noise, t)
                 
@@ -324,7 +345,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             
             final_image_pil = self.image_processor.postprocess(final_image_tensor, output_type=output_type, do_denormalize=[True])[0]
             output_frames_pil.append(final_image_pil)
-            generated_frames_tensors.append(final_image_tensor.detach().clone().squeeze(0))
+            generated_frames_tensors.append(final_image_tensor.detach().clone())
             
         return {"images": output_frames_pil}
 
