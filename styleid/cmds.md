@@ -37,3 +37,9 @@ python video_style_transfer.py \
 
 This will create video_results/
 monet_stylized_video1/ and video_results/monet_stylized_video2/.
+
+source /etc/network_turbo&&conda activate sd1
+python run_video_styleid.py \
+    --content_path /root/autodl-tmp/video_style_transfer/data/content/cat_flower \
+    --style_path /root/autodl-tmp/video_style_transfer/data/style/barege.png \
+    --output_dir ./video_results \

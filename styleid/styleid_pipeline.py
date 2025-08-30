@@ -617,7 +617,32 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
             return final_images
         
         return StableDiffusionPipelineOutput(images=final_images, nsfw_content_detected=[False] * len(final_images))
-
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        """Load the StyleID pipeline from a pretrained model"""
+        # First load using the standard loading
+        pipeline = StableDiffusionImg2ImgPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        
+        # Create our StyleID pipeline
+        styleid_pipe = cls(
+            vae=pipeline.vae,
+            text_encoder=pipeline.text_encoder,
+            tokenizer=pipeline.tokenizer,
+            unet=pipeline.unet,
+            scheduler=pipeline.scheduler,
+            safety_checker=pipeline.safety_checker if hasattr(pipeline, "safety_checker") else None,
+            feature_extractor=pipeline.feature_extractor if hasattr(pipeline, "feature_extractor") else None,
+            image_encoder=getattr(pipeline, "image_encoder", None),
+            requires_safety_checker=pipeline.config.requires_safety_checker if hasattr(pipeline.config, "requires_safety_checker") else False,
+        )
+        
+        # Replace the scheduler with DDIM which is needed for inversion
+        from diffusers import DDIMScheduler
+        if not isinstance(pipeline.scheduler, DDIMScheduler):
+            scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+            styleid_pipe.scheduler = scheduler
+        
+        return styleid_pipe
    
 # Simple demo usage
 if __name__ == "__main__":

@@ -193,6 +193,38 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         if self.flow_model is not None:
             self.flow_model.to(torch_device)
         return self
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        """Load the StyleIDVideoPipeline from a pretrained model."""
+        # This pattern is robust: load the base pipeline from the grandparent or a known source
+        # to get all the standard, pre-trained components correctly.
+        # Since StyleIDPipeline's from_pretrained already does this by loading StableDiffusionImg2ImgPipeline,
+        # we can leverage that. Or we can be explicit here for clarity.
+        
+        # Load all base components from the original diffuser's pipeline
+        base_pipeline = DiffusionPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
+
+        # Now, create an instance of *our* specific class (cls will be StyleIDVideoPipeline)
+        # This ensures the correct __init__ method (the one that loads GMFlow) is called.
+        video_pipe = cls(
+            vae=base_pipeline.vae,
+            text_encoder=base_pipeline.text_encoder,
+            tokenizer=base_pipeline.tokenizer,
+            unet=base_pipeline.unet,
+            scheduler=base_pipeline.scheduler,
+            safety_checker=getattr(base_pipeline, 'safety_checker', None),
+            feature_extractor=getattr(base_pipeline, 'feature_extractor', None),
+            image_encoder=getattr(base_pipeline, 'image_encoder', None),
+            requires_safety_checker=getattr(base_pipeline.config, 'requires_safety_checker', True),
+        )
+
+        # The DDIMScheduler check is crucial for inversion, let's ensure it's here too.
+        from diffusers import DDIMScheduler
+        if not isinstance(video_pipe.scheduler, DDIMScheduler):
+            scheduler = DDIMScheduler.from_config(base_pipeline.scheduler.config)
+            video_pipe.scheduler = scheduler
+
+        return video_pipe
     @torch.no_grad()
     def fidelity_oriented_encode(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
