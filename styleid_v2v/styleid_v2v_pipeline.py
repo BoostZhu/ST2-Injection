@@ -187,8 +187,8 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         except Exception as e:
             print(f"ERROR: Could not load GMFlow model weights. Temporal consistency will fail. Error: {e}")
             self.flow_model = None
+
     def to(self, torch_device):
-        
         super().to(torch_device)
         if self.flow_model is not None:
             self.flow_model.to(torch_device)
@@ -225,6 +225,85 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             video_pipe.scheduler = scheduler
 
         return video_pipe
+    
+    @torch.no_grad()
+    def _denoise_pure_styleid(self, initial_latent: torch.Tensor, text_embeddings: torch.Tensor):
+        self.state.to_transfer()
+        current_latent = initial_latent
+        for t in tqdm(self.scheduler.timesteps, desc="Denoising (Pure StyleID)"):
+            self.state.set_timestep(t.item())
+            noise_pred = self.unet(current_latent, t, encoder_hidden_states=text_embeddings).sample
+            current_latent = self.scheduler.step(noise_pred, t, current_latent).prev_sample
+        return current_latent
+    
+    @torch.no_grad()
+    def _calculate_fusion_target(
+        self,
+        base_stylized_current_frame_tensor: torch.Tensor,
+        original_anchor_frame_tensor: torch.Tensor,
+        original_prev_frame_tensor: torch.Tensor,
+        original_current_frame_tensor: torch.Tensor,
+        stylized_anchor_frame_tensor: torch.Tensor,
+        stylized_prev_frame_tensor: torch.Tensor
+    ):
+        # Warp reference frames
+        warped_anchor, bwd_occ_0, _ = get_warped_and_mask(self.flow_model, original_anchor_frame_tensor, original_current_frame_tensor, stylized_anchor_frame_tensor, device=self.device)
+        warped_prev, bwd_occ_pre, _ = get_warped_and_mask(self.flow_model, original_prev_frame_tensor, original_current_frame_tensor, stylized_prev_frame_tensor, device=self.device)
+
+        # Create blend masks based on occlusion
+        ## FIX: Added .unsqueeze(0) to maintain channel dimension for explicit broadcasting.
+        blend_mask_0 = blur(F.max_pool2d(bwd_occ_0.unsqueeze(1), kernel_size=9, stride=1, padding=4))
+        blend_mask_0 = torch.clamp(blend_mask_0 + bwd_occ_0.unsqueeze(1), 0, 1)
+
+        blend_mask_pre = blur(F.max_pool2d(bwd_occ_pre.unsqueeze(1), kernel_size=9, stride=1, padding=4))
+        blend_mask_pre = torch.clamp(blend_mask_pre + bwd_occ_pre.unsqueeze(1), 0, 1)
+
+        # Fuse images
+        blend_results = (1 - blend_mask_pre) * warped_prev + blend_mask_pre * base_stylized_current_frame_tensor
+        blend_results = (1 - blend_mask_0) * warped_anchor + blend_mask_0 * blend_results
+
+        # Fidelity-oriented encode
+        xtrg = self.fidelity_oriented_encode(blend_results.to(self.vae.dtype))
+
+        # Calculate final fusion mask for the denoising loop
+        final_occ_mask = 1 - torch.clamp((1 - bwd_occ_pre) + (1 - bwd_occ_0), 0, 1)
+        final_blend_mask = blur(F.max_pool2d(final_occ_mask.unsqueeze(1), kernel_size=9, stride=1, padding=4))
+        final_blend_mask = 1 - torch.clamp(final_blend_mask + final_occ_mask.unsqueeze(1), 0, 1)
+        
+        return xtrg, final_blend_mask
+
+    @torch.no_grad()
+    def _denoise_with_pa_fusion(
+        self,
+        initial_latent: torch.Tensor,
+        text_embeddings: torch.Tensor,
+        xtrg: torch.Tensor,
+        fusion_mask: torch.Tensor,
+        mask_strength: float
+    ):
+        self.state.to_transfer()
+        current_latent = initial_latent
+
+        # Resize fusion mask to latent space dimensions
+        fusion_mask_latent = 1.0 - F.interpolate(fusion_mask, size=current_latent.shape[-2:], mode='bilinear') * mask_strength
+        fusion_mask_latent = fusion_mask_latent.to(current_latent.dtype)
+        
+        for t in tqdm(self.scheduler.timesteps, desc="Denoising (with PA Fusion)"):
+            self.state.set_timestep(t.item())
+
+            # Latent Inpainting / Fusion
+            noise = torch.randn_like(current_latent)
+            latents_ref = self.scheduler.add_noise(xtrg, noise, t)
+            fused_latent = current_latent * fusion_mask_latent + latents_ref * (1 - fusion_mask_latent)
+            
+            # U-Net Denoising with StyleID
+            noise_pred = self.unet(fused_latent, t, encoder_hidden_states=text_embeddings).sample
+            
+            # DDIM Step, using the fused latent as the input for this step
+            current_latent = self.scheduler.step(noise_pred, t, fused_latent).prev_sample
+        
+        return current_latent
+    
     @torch.no_grad()
     def fidelity_oriented_encode(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -241,6 +320,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         final_latent = x_r + compensation
         return final_latent * self.vae.config.scaling_factor
 
+    '''
     @torch.no_grad()
     def denoising_loop_with_fusion(
         self, 
@@ -380,4 +460,94 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             generated_frames_tensors.append(final_image_tensor.detach().clone())
             
         return {"images": output_frames_pil}
+    '''
+    def style_transfer_video(self, content_frames: List[np.ndarray], style_image: np.ndarray, num_inference_steps: int = 50, gamma=0.75, temperature=1.5, without_init_adain=False, mask_strength: float = 0.7, output_type="pil"):
+        if self.flow_model is None: raise ImportError("GMFlow model is not loaded. Cannot perform video style transfer.")
 
+        # --- 1. SETUP ---
+        self.update_parameters(gamma=gamma, temperature=temperature, without_init_adain=without_init_adain)
+        self.scheduler.set_timesteps(num_inference_steps, device=self.device)
+        device = self.device
+        
+        processed_content_frames = [normalize(frame).to(device=device, dtype=self.vae.dtype).squeeze(0) for frame in content_frames]
+        text_embeddings = self.get_text_embedding()
+
+        # --- 2. PRE-COMPUTATION ---
+        print("Step 1: Pre-computing style features...")
+        style_cache = self.precompute_style(style_image, num_inference_steps)
+        self.state.style_features = style_cache["style_features"]
+        ## FIX #1: Used correct key "style_latents". Renamed for clarity.
+        style_noisy_latent_T = style_cache["style_latents"][0] # Noisy latent z_T^s
+        
+        # --- Process Anchor Frame (Frame 0) ---
+        print("Step 2: Processing anchor frame (Frame 0)...")
+        self.state.content_features.clear()
+        self.state.to_invert_content()
+        content_latent_0 = self.encode_image(processed_content_frames[0].unsqueeze(0))
+        content_latents_0 = self.ddim_inversion(content_latent_0, text_embeddings)
+        content_latent_T_0 = content_latents_0[0]
+
+        if not self.without_init_adain:
+            initial_latent_0 = (content_latent_T_0 - content_latent_T_0.mean(dim=(2,3), keepdim=True)) / (content_latent_T_0.std(dim=(2,3), keepdim=True) + 1e-4) * style_noisy_latent_T.std(dim=(2,3), keepdim=True) + style_noisy_latent_T.mean(dim=(2,3), keepdim=True)
+        else:
+            initial_latent_0 = content_latent_T_0
+            
+        final_latent_0 = self._denoise_pure_styleid(initial_latent_0, text_embeddings)
+        stylized_anchor_frame_tensor = self.decode_latent(final_latent_0)
+        
+        # --- Store results and initialize sliding window ---
+        output_frames_pil = [self.image_processor.postprocess(stylized_anchor_frame_tensor, output_type=output_type, do_denormalize=[True])[0]]
+        stylized_prev_frame_tensor = stylized_anchor_frame_tensor.detach().clone()
+        
+        # --- 3. FRAME-BY-FRAME GENERATION (i > 0) ---
+        for i in range(1, len(processed_content_frames)):
+            print(f"\nProcessing Frame {i}...")
+            current_content_tensor = processed_content_frames[i]
+            
+            # --- 3.1: On-the-fly Inversion of current frame I_c_i ---
+            self.state.content_features.clear()
+            self.state.to_invert_content()
+            content_latent_i = self.encode_image(current_content_tensor.unsqueeze(0))
+            content_latents_i = self.ddim_inversion(content_latent_i, text_embeddings)
+            content_latent_T_i = content_latents_i[0]
+            
+            # Initialize Latent z_T^{cs_i}
+            if not self.without_init_adain:
+                initial_latent_i = (content_latent_T_i - content_latent_T_i.mean(dim=(2,3), keepdim=True)) / (content_latent_T_i.std(dim=(2,3), keepdim=True) + 1e-4) * style_noisy_latent_T.std(dim=(2,3), keepdim=True) + style_noisy_latent_T.mean(dim=(2,3), keepdim=True)
+            else:
+                initial_latent_i = content_latent_T_i
+
+            # --- 3.2 (Step I): Generate base result I_bar_prime_i ---
+            print(f"  - Step {i}.1: Generating base stylized frame (no fusion)...")
+            base_final_latent_i = self._denoise_pure_styleid(initial_latent_i.clone(), text_embeddings)
+            base_stylized_frame_tensor_i = self.decode_latent(base_final_latent_i)
+            
+            # --- 3.3 (Step II): Build and encode fusion target xtrg ---
+            print(f"  - Step {i}.2: Calculating PA Fusion target...")
+            xtrg, fusion_mask = self._calculate_fusion_target(
+                base_stylized_current_frame_tensor=base_stylized_frame_tensor_i,
+                original_anchor_frame_tensor=processed_content_frames[0],
+                original_prev_frame_tensor=processed_content_frames[i-1],
+                original_current_frame_tensor=current_content_tensor,
+                stylized_anchor_frame_tensor=stylized_anchor_frame_tensor,
+                stylized_prev_frame_tensor=stylized_prev_frame_tensor
+            )
+
+            # --- 3.4 (Step III): Execute final denoising with PA Fusion ---
+            print(f"  - Step {i}.3: Denoising with PA Fusion...")
+            final_latent_i = self._denoise_with_pa_fusion(
+                initial_latent=initial_latent_i.clone(),
+                text_embeddings=text_embeddings,
+                xtrg=xtrg,
+                fusion_mask=fusion_mask,
+                mask_strength=mask_strength
+            )
+
+            # --- 3.5: Decode, save, and update window ---
+            final_image_tensor = self.decode_latent(final_latent_i)
+            output_frames_pil.append(self.image_processor.postprocess(final_image_tensor, output_type=output_type, do_denormalize=[True])[0])
+            
+            stylized_prev_frame_tensor = final_image_tensor.detach().clone()
+            
+        ## FIX #2: Removed redundant definition of fidelity_oriented_encode from here.
+        return {"images": output_frames_pil}    
