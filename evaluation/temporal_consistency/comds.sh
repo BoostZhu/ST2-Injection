@@ -19,4 +19,4 @@ python temporal_consistency_unified.py /root/autodl-tmp/VISION/output_contrast/c
 python temporal_consistency_unified.py /root/autodl-tmp/VISION/output/exp_5/stylized_video_gamma_0_45/0_34
 
 python temporal_consistency_unified.py /root/autodl-tmp/VISION/output/baseline/bird_forest_default
-python temporal_consistency_unified.py /path/to/images
+python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/results/baseline/Gondola_stylized_cat_flower
