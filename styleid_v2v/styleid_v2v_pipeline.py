@@ -251,7 +251,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         warped_prev, bwd_occ_pre, _ = get_warped_and_mask(self.flow_model, original_prev_frame_tensor, original_current_frame_tensor, stylized_prev_frame_tensor, device=self.device)
 
         # Create blend masks based on occlusion
-        ## FIX: Added .unsqueeze(0) to maintain channel dimension for explicit broadcasting.
+        
         blend_mask_0 = blur(F.max_pool2d(bwd_occ_0.unsqueeze(1), kernel_size=9, stride=1, padding=4))
         blend_mask_0 = torch.clamp(blend_mask_0 + bwd_occ_0.unsqueeze(1), 0, 1)
 
@@ -476,7 +476,6 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         print("Step 1: Pre-computing style features...")
         style_cache = self.precompute_style(style_image, num_inference_steps)
         self.state.style_features = style_cache["style_features"]
-        ## FIX #1: Used correct key "style_latents". Renamed for clarity.
         style_noisy_latent_T = style_cache["style_latents"][0] # Noisy latent z_T^s
         
         # --- Process Anchor Frame (Frame 0) ---
