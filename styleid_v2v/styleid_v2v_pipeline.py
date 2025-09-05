@@ -272,6 +272,47 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         
         return xtrg, final_blend_mask
 
+     @torch.no_grad()
+    def _calculate_fusion_target_anchor_only(
+        self,
+        base_stylized_current_frame_tensor: torch.Tensor,
+        original_anchor_frame_tensor: torch.Tensor,
+        original_current_frame_tensor: torch.Tensor,
+        stylized_anchor_frame_tensor: torch.Tensor
+    ):
+        """
+        Calculates the fusion target by only relying on the anchor frame (frame 0)
+        to prevent temporal error accumulation.
+        """
+        # Warp the stylized anchor frame to the current frame's perspective using optical flow
+        warped_anchor, bwd_occ_0, _ = get_warped_and_mask(
+            self.flow_model,
+            original_anchor_frame_tensor,
+            original_current_frame_tensor,
+            stylized_anchor_frame_tensor,
+            device=self.device
+        )
+
+        # Create a blend mask based on the occlusion map from the anchor frame.
+        # This mask identifies areas where the warp is unreliable (e.g., parts of the scene
+        # that were not visible in the anchor frame).
+        blend_mask_0 = blur(F.max_pool2d(bwd_occ_0.unsqueeze(1), kernel_size=9, stride=1, padding=4))
+        blend_mask_0 = torch.clamp(blend_mask_0 + bwd_occ_0.unsqueeze(1), 0, 1)
+
+        # Fuse the warped anchor with the base stylized frame.
+        # In reliable areas (mask=0), use the temporally consistent warped anchor.
+        # In unreliable/occluded areas (mask=1), fall back to the newly generated stylized frame.
+        blend_results = (1 - blend_mask_0) * warped_anchor + blend_mask_0 * base_stylized_current_frame_tensor
+
+        # Encode the fused image to get the target latent xtrg for the denoising process
+        xtrg = self.fidelity_oriented_encode(blend_results.to(self.vae.dtype))
+
+        # The final blend mask for the denoising loop should define where to trust the
+        # warped reference (xtrg). This is the non-occluded area.
+        final_blend_mask = 1.0 - blend_mask_0
+        
+        return xtrg, final_blend_mask
+
     @torch.no_grad()
     def _denoise_with_pa_fusion(
         self,
@@ -321,6 +362,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         return final_latent * self.vae.config.scaling_factor
 
     
+    # === REPLACE THE EXISTING style_transfer_video METHOD WITH THIS ONE ===
     def style_transfer_video(self, content_frames: List[np.ndarray], style_image: np.ndarray, num_inference_steps: int = 50, gamma=0.75, temperature=1.5, without_init_adain=False, mask_strength: float = 0.7, output_type="pil"):
         if self.flow_model is None: raise ImportError("GMFlow model is not loaded. Cannot perform video style transfer.")
 
@@ -354,9 +396,11 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         final_latent_0 = self._denoise_pure_styleid(initial_latent_0, text_embeddings)
         stylized_anchor_frame_tensor = self.decode_latent(final_latent_0)
         
-        # --- Store results and initialize sliding window ---
+        # --- Store results ---
         output_frames_pil = [self.image_processor.postprocess(stylized_anchor_frame_tensor, output_type=output_type, do_denormalize=[True])[0]]
-        stylized_prev_frame_tensor = stylized_anchor_frame_tensor.detach().clone()
+        
+        .
+        # stylized_prev_frame_tensor = stylized_anchor_frame_tensor.detach().clone()
         
         # --- 3. FRAME-BY-FRAME GENERATION (i > 0) ---
         for i in range(1, len(processed_content_frames)):
@@ -382,14 +426,13 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             base_stylized_frame_tensor_i = self.decode_latent(base_final_latent_i)
             
             # --- 3.3 (Step II): Build and encode fusion target xtrg ---
-            print(f"  - Step {i}.2: Calculating PA Fusion target...")
-            xtrg, fusion_mask = self._calculate_fusion_target(
+            
+            print(f"  - Step {i}.2: Calculating Anchor-Only Fusion target...")
+            xtrg, fusion_mask = self._calculate_fusion_target_anchor_only(
                 base_stylized_current_frame_tensor=base_stylized_frame_tensor_i,
                 original_anchor_frame_tensor=processed_content_frames[0],
-                original_prev_frame_tensor=processed_content_frames[i-1],
                 original_current_frame_tensor=current_content_tensor,
-                stylized_anchor_frame_tensor=stylized_anchor_frame_tensor,
-                stylized_prev_frame_tensor=stylized_prev_frame_tensor
+                stylized_anchor_frame_tensor=stylized_anchor_frame_tensor
             )
 
             # --- 3.4 (Step III): Execute final denoising with PA Fusion ---
@@ -402,11 +445,11 @@ class StyleIDVideoPipeline(StyleIDPipeline):
                 mask_strength=mask_strength
             )
 
-            # --- 3.5: Decode, save, and update window ---
+            # --- 3.5: Decode and save ---
             final_image_tensor = self.decode_latent(final_latent_i)
             output_frames_pil.append(self.image_processor.postprocess(final_image_tensor, output_type=output_type, do_denormalize=[True])[0])
             
-            stylized_prev_frame_tensor = final_image_tensor.detach().clone()
+            # --- [REMOVED] --- Do not update the previous frame tensor. This is the key change.
+            # stylized_prev_frame_tensor = final_image_tensor.detach().clone()
             
-        ## FIX #2: Removed redundant definition of fidelity_oriented_encode from here.
-        return {"images": output_frames_pil}    
+        return {"images": output_frames_pil}
