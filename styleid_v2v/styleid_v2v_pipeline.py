@@ -399,7 +399,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         # --- Store results ---
         output_frames_pil = [self.image_processor.postprocess(stylized_anchor_frame_tensor, output_type=output_type, do_denormalize=[True])[0]]
         
-        .
+        
         # stylized_prev_frame_tensor = stylized_anchor_frame_tensor.detach().clone()
         
         # --- 3. FRAME-BY-FRAME GENERATION (i > 0) ---
