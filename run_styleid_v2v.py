@@ -100,7 +100,7 @@ if __name__ == "__main__":
     parser.add_argument("--ddim_steps", type=int, default=50, help="DDIM反转和采样的步数")
     parser.add_argument("--gamma", type=float, default=0.75, help="Query保留强度 (控制内容保留程度)")
     parser.add_argument("--temperature", type=float, default=1.5, help="注意力温度系数 (控制风格化强度)")
-    parser.add_argument("--mask_strength", type=float, default=0.7, help="PA Fusion的融合强度")
+    parser.add_argument("--mask_strength", type=float, default=1.0, help="PA Fusion的融合强度")
     
     # --- 其他选项 ---
     parser.add_argument("--without_init_adain", action="store_true", help="禁用初始latent的AdaIN操作")
