@@ -272,7 +272,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         
         return xtrg, final_blend_mask
 
-     @torch.no_grad()
+    @torch.no_grad()
     def _calculate_fusion_target_anchor_only(
         self,
         base_stylized_current_frame_tensor: torch.Tensor,

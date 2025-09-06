@@ -18,5 +18,7 @@ python style_similarity.py /root/autodl-tmp/VISION/output/exp_5/stylized_anchor_
 python temporal_consistency_unified.py /root/autodl-tmp/VISION/output_contrast/ccpl/exp_2
 python temporal_consistency_unified.py /root/autodl-tmp/VISION/output/exp_5/stylized_video_gamma_0_45/0_34
 
+source /etc/network_turbo&&conda activate sd1
 python temporal_consistency_unified.py /root/autodl-tmp/VISION/output/baseline/bird_forest_default
 python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/results/baseline/Gondola_stylized_cat_flower
+python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/results/with_PA_fusion_2/Gondola_stylized_cat_flower
