@@ -1,0 +1,7 @@
+Folder Path,DINO Score,CLIP Score,Average Score
+/root/autodl-tmp/video_style_transfer/trial/barege_stylized_bird_hand,0.8494,0.9546,0.9020
+/root/autodl-tmp/video_style_transfer/trial/gb2/Gondola_stylized_cat_flower,0.8733,0.9497,0.9115
+/root/autodl-tmp/video_style_transfer/trial/gb2_ms07/Gondola_stylized_cat_flower,0.8696,0.9478,0.9087
+/root/autodl-tmp/video_style_transfer/trial/gb52/Gondola_stylized_cat_flower,0.8709,0.9521,0.9115
+/root/autodl-tmp/video_style_transfer/trial/gb52/barege_stylized_bird_hand,0.8391,0.9556,0.8974
+/root/autodl-tmp/video_style_transfer/trial/gb52/barege_stylized_cat_flower,0.8328,0.9565,0.8947

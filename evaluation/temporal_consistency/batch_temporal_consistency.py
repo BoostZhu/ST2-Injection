@@ -2,7 +2,7 @@ import os
 import argparse
 from temporal_consistency_unified import calculate_with_both_models
 
-'''cmd: python batch_temporal_consistency.py /root/autodl-tmp/VISION/output/exp_5/stylized_video_gamma_0_45'''
+'''python evaluation/temporal_consistency/batch_temporal_consistency.py trial/foe'''
 
 def process_folders(base_dir, output_file=None):
     """

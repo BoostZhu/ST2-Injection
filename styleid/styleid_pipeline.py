@@ -335,7 +335,9 @@ class StyleIDPipeline(StableDiffusionImg2ImgPipeline):
             text_embeddings = self.get_text_embedding()
             
         # Prepare for inversion
-        timesteps = reversed(self.scheduler.timesteps)#timesteps=[1,21,41,...,981]
+        timesteps = reversed(self.scheduler.timesteps)
+        #self.scheduler.timesteps=[981,961,941,...,1]
+        #timesteps=[1,21,41,...,981]
         num_inference_steps = len(self.scheduler.timesteps)
         
         # Ensure scheduler uses deterministic algorithm for inversion

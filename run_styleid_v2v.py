@@ -7,7 +7,7 @@ import torch
 import imageio
 import numpy as np
 from PIL import Image
-
+import random
 # 导入我们自定义的视频管线
 # 假设此脚本与 styleid/ 文件夹在同一目录下
 from styleid_v2v.styleid_v2v_pipeline import StyleIDVideoPipeline
@@ -87,6 +87,7 @@ def main(args):
 
 
 if __name__ == "__main__":
+    random.seed(42)
     parser = argparse.ArgumentParser(description="使用StyleIDVideoPipeline进行视频风格迁移")
     
     # --- 路径和模型参数 ---

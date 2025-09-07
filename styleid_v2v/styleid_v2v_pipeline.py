@@ -101,7 +101,15 @@ class InputPadder:
         ht, wd = x.shape[-2:]
         c = [self._pad[2], ht - self._pad[3], self._pad[0], wd - self._pad[1]]
         return x[..., c[0] : c[1], c[2] : c[3]]
-
+        
+def center_crop_to_square(image: np.ndarray) -> np.ndarray:
+    """将图像从中心裁切为最大的正方形。"""
+    h, w, _ = image.shape
+    if h == w: return image
+    min_side = min(h, w)
+    top = (h - min_side) // 2
+    left = (w - min_side) // 2
+    return image[top : top + min_side, left : left + min_side]
 
 @torch.no_grad()
 def get_warped_and_mask(flow_model, image1, image2, image3=None, pixel_consistency=False, device=None):
@@ -346,23 +354,45 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         return current_latent
     
     @torch.no_grad()
-    def fidelity_oriented_encode(self, image_tensor: torch.Tensor) -> torch.Tensor:
+    def fidelity_oriented_encode(self, image_tensor: torch.Tensor, error_threshold: float = 0.25) -> torch.Tensor:
         """
-        Implements a simplified fidelity-oriented image encoding from Rerender-A-Video.
+        实现了 Rerender-A-Video 论文中完整的保真度导向编码方法+。
         """
+        scale_factor = self.vae.config.scaling_factor
         if image_tensor.dim() == 3:
             image_tensor = image_tensor.unsqueeze(0)
 
-        x_r = self.vae.encode(image_tensor).latent_dist.sample()
-        I_r = self.vae.decode(x_r).sample
-        x_rr = self.vae.encode(I_r).latent_dist.sample()
+        # 1. 编码图像，并立即乘以 scaling_factor 得到正确的 scaled latent
+        x_r = self.vae.encode(image_tensor).latent_dist.sample() * scale_factor
+
+        # 2. 解码前，除以 scaling_factor
+        I_r = self.vae.decode(x_r / scale_factor, return_dict=False)[0]
         
+        # 3. 再次编码并缩放，得到用于计算补偿的 x_rr
+        x_rr = self.vae.encode(I_r).latent_dist.sample() * scale_factor
+        
+        # 4. 计算补偿项和应用了全局补偿的 latent
+        #    此时 x_r 和 x_rr 都处于正确的 scaled space，可以直接计算
         compensation = x_r - x_rr
-        final_latent = x_r + compensation
-        return final_latent * self.vae.config.scaling_factor
+        latent_compensated = x_r + compensation
+
+        # 5. 解码补偿后的 latent 以计算误差，同样需要先 unscale
+        image_compensated_reconstructed = self.vae.decode(latent_compensated / scale_factor, return_dict=False)[0]
+
+        # 6. 计算低错误区域掩码
+        error_map = torch.abs(image_tensor - image_compensated_reconstructed).mean(dim=1, keepdim=True)
+        high_error_mask_img = (error_map > error_threshold).to(dtype=image_tensor.dtype)
+        high_error_mask_latent = F.interpolate(high_error_mask_img, size=x_r.shape[-2:], mode='bilinear')
+        low_error_mask = 1.0 - high_error_mask_latent
+
+        # 7. 在正确的 scaled space 中应用带掩码的补偿
+        final_latent = x_r + low_error_mask * compensation
+        
+        # 8. 返回的 final_latent 已经是正确的 scaled latent，可直接用于 UNet
+        return final_latent
 
     
-    # === REPLACE THE EXISTING style_transfer_video METHOD WITH THIS ONE ===
+    
     def style_transfer_video(self, content_frames: List[np.ndarray], style_image: np.ndarray, num_inference_steps: int = 50, gamma=0.75, temperature=1.5, without_init_adain=False, mask_strength: float = 0.7, output_type="pil"):
         if self.flow_model is None: raise ImportError("GMFlow model is not loaded. Cannot perform video style transfer.")
 

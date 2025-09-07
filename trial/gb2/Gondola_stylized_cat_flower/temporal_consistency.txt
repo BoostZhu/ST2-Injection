@@ -1,0 +1,5 @@
+Folder: Gondola_stylized_cat_flower
+Path: /root/autodl-tmp/video_style_transfer/trial/gb2/Gondola_stylized_cat_flower
+DINO Score: 0.8733
+CLIP Score: 0.9497
+Average Score: 0.9115
