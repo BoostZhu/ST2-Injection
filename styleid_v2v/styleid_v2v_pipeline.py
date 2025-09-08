@@ -233,6 +233,24 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             video_pipe.scheduler = scheduler
 
         return video_pipe
+    def _preprocess_image(self, image_np: np.ndarray) -> torch.Tensor:
+        """
+        完整的预处理流程：裁切 -> 标准化 -> 填充。
+        输入: NumPy 数组 (H, W, C), BGR 格式。
+        输出: PyTorch Tensor (1, C, H_pad, W_pad), RGB, 范围 [-1, 1]。
+        """
+        # 1. 中心裁切为正方形
+        image_cropped = center_crop_to_square(image_np)
+
+        # 2. 标准化 (包含转换为Tensor和RGB)
+        # 注意：normalize函数返回的是一个批次为1的Tensor
+        image_tensor = normalize(image_cropped) 
+
+        # 3. 使用InputPadder填充到8的倍数
+        padder = InputPadder(image_tensor.shape, padding_factor=8)
+        image_padded = padder.pad(image_tensor)[0] # pad返回列表，我们取第一个元素
+
+        return image_padded.to(device=self.device, dtype=self.vae.dtype)    
     
     @torch.no_grad()
     def _denoise_pure_styleid(self, initial_latent: torch.Tensor, text_embeddings: torch.Tensor):
@@ -400,8 +418,8 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         self.update_parameters(gamma=gamma, temperature=temperature, without_init_adain=without_init_adain)
         self.scheduler.set_timesteps(num_inference_steps, device=self.device)
         device = self.device
-        
-        processed_content_frames = [normalize(frame).to(device=device, dtype=self.vae.dtype).squeeze(0) for frame in content_frames]
+        print("Preprocessing frames...")
+        processed_content_frames = [self._preprocess_image(frame) for frame in tqdm(content_frames, desc="Preprocessing Content")]
         text_embeddings = self.get_text_embedding()
 
         # --- 2. PRE-COMPUTATION ---
