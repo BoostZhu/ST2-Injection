@@ -1,5 +1,0 @@
-Folder: barege_stylized_bird_hand
-Path: /root/autodl-tmp/video_style_transfer/trial/barege_stylized_bird_hand
-DINO Score: 0.8494
-CLIP Score: 0.9546
-Average Score: 0.9020
