@@ -116,7 +116,7 @@ def get_warped_and_mask(flow_model, image1, image2, image3=None, pixel_consisten
     if image3 is None:
         image3 = image1
     padder = InputPadder(image1.shape, padding_factor=8)
-    image1, image2 = padder.pad(image1[None].to(device), image2[None].to(device))
+    image1, image2 = padder.pad(image1.to(device), image2.to(device)) 
     results_dict = flow_model(
         image1, image2, attn_splits_list=[2], corr_radius_list=[-1], prop_radius_list=[-1], pred_bidir_flow=True
     )
@@ -235,22 +235,29 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         return video_pipe
     def _preprocess_image(self, image_np: np.ndarray) -> torch.Tensor:
         """
-        完整的预处理流程：裁切 -> 标准化 -> 填充。
-        输入: NumPy 数组 (H, W, C), BGR 格式。
-        输出: PyTorch Tensor (1, C, H_pad, W_pad), RGB, 范围 [-1, 1]。
+        一个健壮的、自包含的预处理流程。
+        输入: NumPy 数组 (H, W, C), 任意尺寸, BGR 格式。
+        输出: PyTorch Tensor (1, C, H_new, W_new), RGB, 尺寸为16的倍数, 范围 [-1, 1]。
         """
-        # 1. 中心裁切为正方形
+        # 1. 中心裁切为最大的正方形
         image_cropped = center_crop_to_square(image_np)
+        h, w, _ = image_cropped.shape
 
-        # 2. 标准化 (包含转换为Tensor和RGB)
-        # 注意：normalize函数返回的是一个批次为1的Tensor
-        image_tensor = normalize(image_cropped) 
+        # 2. 【关键步骤】计算新的、符合16倍数要求的尺寸
+        # GMFlow的注意力机制要求特征图尺寸为偶数，特征图是原图的1/8，所以原图尺寸必须是16的倍数。
+        target_h = (h // 16) * 16
+        target_w = (w // 16) * 16
+        
+        # 如果尺寸有变化，则进行高质量的缩放
+        if h != target_h or w != target_w:
+            image_resized = cv2.resize(image_cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        else:
+            image_resized = image_cropped
 
-        # 3. 使用InputPadder填充到8的倍数
-        padder = InputPadder(image_tensor.shape, padding_factor=8)
-        image_padded = padder.pad(image_tensor)[0] # pad返回列表，我们取第一个元素
+        # 3. 标准化 (包含转换为Tensor和RGB)，返回一个带batch维度的4D Tensor
+        image_tensor = normalize(image_resized) 
 
-        return image_padded.to(device=self.device, dtype=self.vae.dtype)    
+        return image_tensor.to(device=self.device, dtype=self.vae.dtype) 
     
     @torch.no_grad()
     def _denoise_pure_styleid(self, initial_latent: torch.Tensor, text_embeddings: torch.Tensor):
@@ -432,7 +439,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         print("Step 2: Processing anchor frame (Frame 0)...")
         self.state.content_features.clear()
         self.state.to_invert_content()
-        content_latent_0 = self.encode_image(processed_content_frames[0].unsqueeze(0))
+        content_latent_0 = self.encode_image(processed_content_frames[0])
         content_latents_0 = self.ddim_inversion(content_latent_0, text_embeddings)
         content_latent_T_0 = content_latents_0[0]
 
@@ -458,7 +465,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
             # --- 3.1: On-the-fly Inversion of current frame I_c_i ---
             self.state.content_features.clear()
             self.state.to_invert_content()
-            content_latent_i = self.encode_image(current_content_tensor.unsqueeze(0))
+            content_latent_i = self.encode_image(current_content_tensor)
             content_latents_i = self.ddim_inversion(content_latent_i, text_embeddings)
             content_latent_T_i = content_latents_i[0]
             
