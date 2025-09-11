@@ -48,19 +48,21 @@ def run_style_transfer_for_pair(pipe, content_name, style_name, args):
         
         content_frames = []
         for p in frame_paths:
-            frame = cv2.imread(p)
-            if frame is not None:
-                content_frames.append(frame) # Directly append the original BGR NumPy array
+            frame_bgr = cv2.imread(p)
+            if frame_bgr is not None:
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                content_frames.append(frame_rgb)
+                 # Directly append the original BGR NumPy array
 
         if not content_frames:
             tqdm.write(f"Error: Could not read any valid frames from '{content_folder_path}', skipping.")
             return
             
-        style_image = cv2.imread(style_image_path)
-        if style_image is None:
+        style_image_bgr = cv2.imread(style_image_path)
+        if style_image_bgr is None:
             tqdm.write(f"Error: Could not load style image '{style_image_path}', skipping.")
             return
-        
+        style_image = cv2.cvtColor(style_image_bgr, cv2.COLOR_BGR2RGB)
         # --- Call the core pipeline ---
         # The Pipeline will now handle all sizing issues itself
         result = pipe.style_transfer_video(

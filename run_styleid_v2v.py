@@ -8,6 +8,7 @@ import imageio
 import numpy as np
 from PIL import Image
 import random
+import time
 from styleid_v2v.styleid_v2v_pipeline import StyleIDVideoPipeline
 
 def main(args):
@@ -54,6 +55,7 @@ def main(args):
 
     # --- 3. Execute style transfer ---
     print("Starting video style transfer...")
+    start_time = time.time()  # Start timer
     result = pipe.style_transfer_video(
         content_frames=content_frames,
         style_image=style_image,
@@ -65,7 +67,9 @@ def main(args):
     )
     
     output_frames = result['images'] # Returns a list of PIL Images
-    print("Style transfer completed!")
+    end_time = time.time()  # End timer
+    elapsed_time = end_time - start_time
+    print(f"Style transfer completed! Total time taken: {elapsed_time:.2f} seconds.")
 
     # --- 4. Save results ---
     # Create output directory, named according to the required format
