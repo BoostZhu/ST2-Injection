@@ -138,7 +138,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fusion-end-percent", 
         type=float, 
-        default=0.8,
+        default=1.0,
         help="At what percentage of the denoising steps to end the fusion (e.g., 0.8 for 80%%)."
     )
     
