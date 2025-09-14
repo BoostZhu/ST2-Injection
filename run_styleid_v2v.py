@@ -28,7 +28,7 @@ def main(args):
 
     # Load content frames
     # Use glob to find all jpg files and sort them to ensure correct frame order
-    frame_paths = sorted(glob.glob(os.path.join(content_folder_path, '*.jpg')), key=lambda x: int(os.path.basename(x).split('.')[0]))
+    frame_paths = sorted(glob.glob(os.path.join(content_folder_path, '*.jpg')) + glob.glob(os.path.join(content_folder_path, '*.png')), key=lambda x: int(os.path.basename(x).split('.')[0]))
     if not frame_paths:
         raise ValueError(f"No .jpg frames found in {content_folder_path}")
         
