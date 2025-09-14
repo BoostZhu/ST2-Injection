@@ -3,7 +3,8 @@ import torchvision.transforms as transforms
 from PIL import Image
 from glob import glob
 import clip
-
+import warnings
+warnings.filterwarnings("ignore", message="xFormers is not available")
 class FeatureExtractor:
     def __init__(self, model_type="dino"):
         """

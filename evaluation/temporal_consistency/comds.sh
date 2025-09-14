@@ -23,4 +23,8 @@ python temporal_consistency_unified.py /root/autodl-tmp/VISION/output/baseline/b
 python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/results/baseline/Gondola_stylized_cat_flower
 python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/results/with_PA_fusion_2/Gondola_stylized_cat_flower
 python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/results/anchor_only/ma1/Gondola_stylized_cat_flower
-python ./evaluation/temporal_consistency/temporal_consistency_unified.py results/baseline/fairy_lake_stylized_bird_hand
+python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/trial/fusion_time_exp/prev_only_0508/Gondola_stylized_cat_flower
+python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/results/pa_anchor_ma1/Gondola_stylized_cat_flower
+python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/trial/fusion_time_exp/prev_only_0510/Gondola_stylized_cat_flower
+python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/trial/fusion_time_exp/prev_only_0409/Gondola_stylized_cat_flower
+python ./evaluation/temporal_consistency/temporal_consistency_unified.py /root/autodl-tmp/video_style_transfer/trial/fusion_time_exp/prev_only_0000_baseline/Gondola_stylized_cat_flower

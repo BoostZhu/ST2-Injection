@@ -440,71 +440,105 @@ class StyleIDVideoPipeline(StyleIDPipeline):
     
     
     def style_transfer_video(
-    self, 
-    content_frames: List[np.ndarray], 
-    style_image: np.ndarray, 
-    num_inference_steps: int = 50, 
-    gamma=0.75, 
-    temperature=1.5, 
-    without_init_adain=False, 
-    mask_strength: float = 0.7,
-    # --- 核心控制参数 ---
-    fusion_strategy: str = "anchor_and_prev", # "anchor_only" 或 "anchor_and_prev"
-    fusion_start_percent: float = 0.3,
-    fusion_end_percent: float = 0.8,
-    output_type="pil"
-):
-    if self.flow_model is None: raise ImportError("GMFlow model is not loaded.")
-
-    # ... (SETUP 和 PRE-COMPUTATION 部分代码不变) ...
-
-    # --- Process Anchor Frame (Frame 0) ---
-    print("Step 2: Processing anchor frame (Frame 0)...")
-    # ... (处理第一帧的代码不变) ...
-    # 注意：第一帧我们使用无融合的去噪
-    final_latent_0 = self._denoise_loop(initial_latent_0, text_embeddings) 
-    stylized_anchor_frame_tensor = self.decode_latent(final_latent_0)
-    
-    output_frames_pil = [self.image_processor.postprocess(stylized_anchor_frame_tensor, output_type=output_type, do_denormalize=[True])[0]]
-    stylized_prev_frame_tensor = stylized_anchor_frame_tensor.detach().clone()
-    
-    # --- 3. FRAME-BY-FRAME GENERATION (i > 0) ---
-    for i in range(1, len(processed_content_frames)):
-        print(f"\nProcessing Frame {i} using '{fusion_strategy}' strategy...")
-        # ... (3.1 初始化 initial_latent_i 的代码不变) ...
+        self, 
+        content_frames: List[np.ndarray], 
+        style_image: np.ndarray, 
+        num_inference_steps: int = 50, 
+        gamma=0.75, 
+        temperature=1.5, 
+        without_init_adain=False, 
+        mask_strength: float = 0.7,
+        fusion_strategy: str = "anchor_and_prev", # "anchor_only" 或 "anchor_and_prev"
+        fusion_start_percent: float = 0.5,
+        fusion_end_percent: float = 0.8,
+        output_type="pil"
+    ):
+        if self.flow_model is None: raise ImportError("GMFlow model is not loaded.")
+        # --- 1. SETUP ---
+        self.update_parameters(gamma=gamma, temperature=temperature, without_init_adain=without_init_adain)
+        self.scheduler.set_timesteps(num_inference_steps, device=self.device)
+        device = self.device
+        print("Preprocessing frames...")
+        processed_content_frames = [self._preprocess_image(frame) for frame in tqdm(content_frames, desc="Preprocessing Content")]
+        text_embeddings = self.get_text_embedding()
+         # --- 2. PRE-COMPUTATION ---
+        print("Step 1: Pre-computing style features...")
+        style_cache = self.precompute_style(style_image, num_inference_steps)
+        self.state.style_features = style_cache["style_features"]
+        style_noisy_latent_T = style_cache["style_latents"][0] # Noisy latent z_T^s
         
-        # --- 3.2 (Step I): 生成无融合的基准图 ---
-        print(f"  - Step {i}.1: Generating base stylized frame (no fusion)...")
-        base_final_latent_i = self._denoise_loop(initial_latent_i.clone(), text_embeddings)
-        base_stylized_frame_tensor_i = self.decode_latent(base_final_latent_i)
-        
-        # --- 3.3 (Step II): 根据策略计算融合目标 ---
-        print(f"  - Step {i}.2: Calculating Fusion target...")
-        xtrg, fusion_mask = self._calculate_fusion_target(
-            strategy=fusion_strategy,
-            base_stylized_current_frame_tensor=base_stylized_frame_tensor_i,
-            original_anchor_frame_tensor=processed_content_frames[0],
-            original_current_frame_tensor=processed_content_frames[i],
-            stylized_anchor_frame_tensor=stylized_anchor_frame_tensor,
-            original_prev_frame_tensor=processed_content_frames[i-1],
-            stylized_prev_frame_tensor=stylized_prev_frame_tensor
-        )
-        
-        # --- 3.4 (Step III): 执行带时机控制的最终去噪 ---
-        print(f"  - Step {i}.3: Denoising with controlled fusion...")
-        final_latent_i = self._denoise_loop(
-            initial_latent=initial_latent_i.clone(),
-            text_embeddings=text_embeddings,
-            xtrg=xtrg,
-            fusion_mask=fusion_mask,
-            mask_strength=mask_strength,
-            fusion_start_percent=fusion_start_percent,
-            fusion_end_percent=fusion_end_percent
-        )
 
-        # --- 3.5: 解码、保存并更新滑动窗口 ---
-        final_image_tensor = self.decode_latent(final_latent_i)
-        output_frames_pil.append(self.image_processor.postprocess(final_image_tensor, output_type=output_type, do_denormalize=[True])[0])
-        stylized_prev_frame_tensor = final_image_tensor.detach().clone()
+        # --- Process Anchor Frame (Frame 0) ---
+        
+        print("Step 2: Processing anchor frame (Frame 0)...")
+        self.state.content_features.clear()
+        self.state.to_invert_content()
+        content_latent_0 = self.encode_image(processed_content_frames[0])
+        content_latents_0 = self.ddim_inversion(content_latent_0, text_embeddings)
+        content_latent_T_0 = content_latents_0[0]
+
+        if not self.without_init_adain:
+            initial_latent_0 = (content_latent_T_0 - content_latent_T_0.mean(dim=(2,3), keepdim=True)) / (content_latent_T_0.std(dim=(2,3), keepdim=True) + 1e-4) * style_noisy_latent_T.std(dim=(2,3), keepdim=True) + style_noisy_latent_T.mean(dim=(2,3), keepdim=True)
+        else:
+            initial_latent_0 = content_latent_T_0#Initial latent AdaIN
             
-    return {"images": output_frames_pil}
+        
+        final_latent_0 = self._denoise_loop(initial_latent_0, text_embeddings) 
+        stylized_anchor_frame_tensor = self.decode_latent(final_latent_0)
+        
+        output_frames_pil = [self.image_processor.postprocess(stylized_anchor_frame_tensor, output_type=output_type, do_denormalize=[True])[0]]
+        stylized_prev_frame_tensor = stylized_anchor_frame_tensor.detach().clone()
+        
+        # --- 3. FRAME-BY-FRAME GENERATION (i > 0) ---
+        for i in range(1, len(processed_content_frames)):
+            print(f"\nProcessing Frame {i} using '{fusion_strategy}' strategy...")
+            current_content_tensor = processed_content_frames[i]
+            #---Content frame DDIM Inversion
+            self.state.content_features.clear()
+            self.state.to_invert_content()
+            content_latent_i = self.encode_image(current_content_tensor)
+            content_latents_i = self.ddim_inversion(content_latent_i, text_embeddings)
+            content_latent_T_i = content_latents_i[0]
+
+            if not self.without_init_adain:
+                initial_latent_i = (content_latent_T_i - content_latent_T_i.mean(dim=(2,3), keepdim=True)) / (content_latent_T_i.std(dim=(2,3), keepdim=True) + 1e-4) * style_noisy_latent_T.std(dim=(2,3), keepdim=True) + style_noisy_latent_T.mean(dim=(2,3), keepdim=True)
+            else:
+                initial_latent_i = content_latent_T_i
+
+            #current_content_tensor = processed_content_frames[i]
+            #  --- 3.2 (Step I): Generate base stylized frame (no fusion) ---
+            print(f"  - Step {i}.1: Generating base stylized frame (no fusion)...")
+            base_final_latent_i = self._denoise_loop(initial_latent_i.clone(), text_embeddings)
+            base_stylized_frame_tensor_i = self.decode_latent(base_final_latent_i)
+            
+            # --- 3.3 (Step II): Build and encode fusion target based on strategy ---
+            print(f"  - Step {i}.2: Calculating Fusion target...")
+            xtrg, fusion_mask = self._calculate_fusion_target(
+                strategy=fusion_strategy,
+                base_stylized_current_frame_tensor=base_stylized_frame_tensor_i,
+                original_anchor_frame_tensor=processed_content_frames[0],
+                original_current_frame_tensor=processed_content_frames[i],
+                stylized_anchor_frame_tensor=stylized_anchor_frame_tensor,
+                #↓↓Previous frame info for 'anchor_and_prev' strategy↓↓
+                original_prev_frame_tensor=processed_content_frames[i-1],
+                stylized_prev_frame_tensor=stylized_prev_frame_tensor
+            )
+            
+            # --- 3.4 (Step III): Execute final denoising with controlled fusion ---
+            print(f"  - Step {i}.3: Denoising with controlled fusion...")
+            final_latent_i = self._denoise_loop(
+                initial_latent=initial_latent_i.clone(),
+                text_embeddings=text_embeddings,
+                xtrg=xtrg,
+                fusion_mask=fusion_mask,
+                mask_strength=mask_strength,
+                fusion_start_percent=fusion_start_percent,
+                fusion_end_percent=fusion_end_percent
+            )
+
+            # --- 3.5: Decode, save, and update window ---
+            final_image_tensor = self.decode_latent(final_latent_i)
+            output_frames_pil.append(self.image_processor.postprocess(final_image_tensor, output_type=output_type, do_denormalize=[True])[0])
+            stylized_prev_frame_tensor = final_image_tensor.detach().clone()
+                
+        return {"images": output_frames_pil}
