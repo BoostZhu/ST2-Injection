@@ -353,7 +353,7 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         fusion_mask: Optional[torch.Tensor] = None,
         mask_strength: float = 0.7,
         fusion_start_percent: float = 0.5, # 默认从50%开始
-        fusion_end_percent: float = 0.8,   # 默认在80%结束
+        fusion_end_percent: float = 1.0,   # 默认在100%结束
     ):
         """
         统一的去噪循环。
@@ -448,9 +448,9 @@ class StyleIDVideoPipeline(StyleIDPipeline):
         temperature=1.5, 
         without_init_adain=False, 
         mask_strength: float = 0.7,
-        fusion_strategy: str = "anchor_and_prev", # "anchor_only" 或 "anchor_and_prev"
+        fusion_strategy: str = "anchor_only", # "anchor_only" 或 "anchor_and_prev"
         fusion_start_percent: float = 0.5,
-        fusion_end_percent: float = 0.8,
+        fusion_end_percent: float = 1.0,
         output_type="pil"
     ):
         if self.flow_model is None: raise ImportError("GMFlow model is not loaded.")
