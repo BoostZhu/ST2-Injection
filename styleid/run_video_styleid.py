@@ -5,7 +5,14 @@ import torch
 import glob
 from tqdm import tqdm
 from styleid_pipeline import StyleIDPipeline
+'''use the command below to process all contents with all styles
+    python run_style_transfer.py \
 
+    --content_path /root/autodl-tmp/video_style_transfer/data/data_quant/content \
+
+    --style_path /root/autodl-tmp/video_style_transfer/data/data_quant/style \
+
+    --output_dir ./results/ablation_styleid'''
 def load_image_from_path(image_path):
     """
     Loads an image from a given path and converts it from BGR to RGB.
