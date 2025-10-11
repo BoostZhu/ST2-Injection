@@ -111,7 +111,8 @@ if __name__ == "__main__":
         "Ours": "/root/autodl-tmp/video_style_transfer/results/quant_exp_results_batch_4", 
         "Baseline_1": "/root/autodl-tmp/quantitative_comparison_results/batch_4/CCPL", 
         "Baseline_2": "/root/autodl-tmp/quantitative_comparison_results/batch_4/CSBNet", 
-        "Baseline_3": "/root/autodl-tmp/quantitative_comparison_results/batch_4/MCCNet"
+        "Baseline_3": "/root/autodl-tmp/quantitative_comparison_results/batch_4/MCCNet",
+        "ablation_styid":"/root/autodl-tmp/video_style_transfer/results/ablation_styleid"
     }
     
     BATCH_SIZE = 32 # 根据你的GPU显存大小调整，如果显存不足，可以调小

@@ -1,3 +1,4 @@
+#./styleid/run_video_styleid.py
 import os
 import argparse
 import cv2
@@ -5,14 +6,13 @@ import torch
 import glob
 from tqdm import tqdm
 from styleid_pipeline import StyleIDPipeline
+
 '''use the command below to process all contents with all styles
-    python run_style_transfer.py \
-
+    python styleid/run_video_styleid.py \
     --content_path /root/autodl-tmp/video_style_transfer/data/data_quant/content \
-
     --style_path /root/autodl-tmp/video_style_transfer/data/data_quant/style \
-
     --output_dir ./results/ablation_styleid'''
+
 def load_image_from_path(image_path):
     """
     Loads an image from a given path and converts it from BGR to RGB.
@@ -124,10 +124,6 @@ def main():
         return
 
     # --- 4. Main Processing Loop ---
-    # This baseline processes each frame independently.
-    # While less efficient (re-inverts style for each frame), it's a robust
-    # way to evaluate the core algorithm on video without temporal logic.
-
     for style_path in tqdm(style_paths, desc="Total Styles"):
         try:
             style_image_rgb = load_image_from_path(style_path)
@@ -136,7 +132,7 @@ def main():
             print(f"Skipping style {style_path} due to loading error: {e}")
             continue
 
-        # 1. 对每个风格，只预计算一次
+        # 1. Precompute style features once per style image
         style_cache = pipeline.precompute_style(
             style_image=style_image_rgb,
             num_inference_steps=args.ddim_steps
@@ -152,11 +148,25 @@ def main():
             if not frame_paths:
                 continue
 
+            # ✨ NEW: Fast check to skip if the entire folder is already done
+            num_input_frames = len(frame_paths)
+            num_output_frames = len(glob.glob(os.path.join(result_path, "*.png")))
+            if num_input_frames == num_output_frames:
+                tqdm.write(f"Skipping '{result_folder_name}': All {num_output_frames} frames already exist.")
+                continue
+
             for frame_path in tqdm(frame_paths, desc=f"Stylizing '{content_name}'", leave=False):
                 try:
+                    frame_basename = os.path.basename(frame_path)
+                    output_frame_path = os.path.join(result_path, f"{os.path.splitext(frame_basename)[0]}.png")
+
+                    # ✨ NEW: Core check to skip if this specific frame already exists
+                    if os.path.exists(output_frame_path):
+                        continue
+
                     content_frame_rgb = load_image_from_path(frame_path)
                     
-                    # 2. 对每个内容帧，使用缓存的风格进行迁移
+                    # 2. Use the precomputed style cache for each content frame
                     stylized_output = pipeline.transfer_from_precomputed(
                         content_image=content_frame_rgb,
                         style_cache=style_cache,
@@ -169,8 +179,6 @@ def main():
                     )
                     
                     output_image = stylized_output.images[0]
-                    frame_basename = os.path.basename(frame_path)
-                    output_frame_path = os.path.join(result_path, f"{os.path.splitext(frame_basename)[0]}.png")
                     output_image.save(output_frame_path)
 
                 except Exception as e:

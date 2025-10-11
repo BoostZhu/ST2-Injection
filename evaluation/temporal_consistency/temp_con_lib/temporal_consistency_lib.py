@@ -1,10 +1,10 @@
+#./evaluation/temporal_consistency_lib
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
 import os
 import clip
 from torch.utils.data import Dataset, DataLoader
-# <<< MODIFIED: Removed AutoImageProcessor as it's no longer needed
 from transformers import AutoModel
 
 # 忽略不必要的警告
