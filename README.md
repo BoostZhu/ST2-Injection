@@ -1,6 +1,6 @@
 ## ST-2 Injection (ST2I)
 
-ST-2 Injection (**ST2I**) is a video style transfer system built on top of Stable Diffusion and the StyleID method, extended with temporal consistency via optical flow (GMFlow). It supports:
+ST-2 Injection (**ST2I**) is a video style transfer system built on top of Stable Diffusion. It supports:
 
 - **Single-video style transfer** with temporal consistency (`run_styleid_v2v.py` – referred to here as the **ST2I video script**).
 - **Batch video style transfer** over all content/style combinations (`run_styleid_v2v_batch.py` or `run_all.sh`).
